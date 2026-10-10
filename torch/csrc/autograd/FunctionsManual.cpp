@@ -16,6 +16,8 @@
 #include <ATen/native/Activation.h>
 #include <ATen/native/GridSamplerUtils.h>
 #include <ATen/native/LinearAlgebraUtils.h>
+#include <ATen/native/SmallMatrixExp.h>
+#include <ATen/native/SparseTensorUtils.h>
 #include <ATen/native/nested/NestedTensorUtils.h>
 #include <c10/core/TensorOptions.h>
 #include <c10/util/OptionalArrayRef.h>
@@ -4543,6 +4545,29 @@ Tensor linalg_matrix_exp_differential(
     const Tensor& grad,
     bool adjoint) {
   at::NoTF32Guard disable_tf32;
+
+  // Retain the differentiable augmented-matrix path for higher derivatives
+  // and tensor subclasses. The CUDA kernel computes only the first derivative.
+  if (!at::GradMode::is_enabled() && !areAnyTensorSubclassLike({self, grad}) &&
+      at::native::use_small_matrix_exp(self) && grad.sizes() == self.sizes() &&
+      grad.device() == self.device() &&
+      grad.scalar_type() == self.scalar_type()) {
+    return at::native::small_matrix_exp_stub(
+        at::kCUDA, adjoint ? self.mH() : self, grad);
+  }
+
+  if (!areAnyTensorSubclassLike({self, grad}) &&
+      at::native::use_small_matrix_exp(self) &&
+      self.scalar_type() != at::kFloat) {
+    return differential_analytic_matrix_function(
+        self,
+        grad,
+        [](const Tensor& matrix) {
+          return at::linalg_matrix_exp(matrix.to(at::kFloat))
+              .to(matrix.scalar_type());
+        },
+        adjoint);
+  }
 
   return differential_analytic_matrix_function(
       self, grad, at::linalg_matrix_exp, /* adjoint */ adjoint);

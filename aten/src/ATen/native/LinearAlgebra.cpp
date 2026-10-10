@@ -17,6 +17,7 @@
 #include <ATen/native/ReduceOps.h>
 #include <ATen/native/ReduceOpsUtils.h>
 #include <ATen/native/Resize.h>
+#include <ATen/native/SmallMatrixExp.h>
 #include <ATen/native/mkldnn/Matmul.h>
 #include <ATen/native/mkldnn/Utils.h>
 #include <ATen/cpu/Utils.h>
@@ -2811,6 +2812,9 @@ Tensor backward_analytic_function_of_a_matrix(
 }
 } // end anon namespace
 
+DEFINE_DISPATCH(small_matrix_exp_stub);
+REGISTER_NO_CPU_DISPATCH(small_matrix_exp_stub);
+
 // Computes the matrix exponential for a given batch of squared matrices.
 // The implementation is based on:
 //
@@ -2837,6 +2841,8 @@ Tensor linalg_matrix_exp(const Tensor& a) {
     return a.clone();
   } else if (n == 1) {
     return a.exp();
+  } else if (use_small_matrix_exp(a)) {
+    return small_matrix_exp_stub(kCUDA, a, std::nullopt);
   } else {
     return at::native::mexp(a);
   }

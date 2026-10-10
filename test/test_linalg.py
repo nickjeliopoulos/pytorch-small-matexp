@@ -8094,6 +8094,32 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
         check(2, 3, 3)
         check(2, 3, 5, 5)
 
+    @onlyCUDA
+    @skipCUDAIfRocm("small matrix exponential CUDA kernel is NVIDIA-only")
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [2, 3, 4, 7, 8, 13, 16, 23, 32])
+    def test_linalg_matrix_exp_small_cuda(self, device, dtype, n):
+        for batch in (0, 35):
+            a = (torch.randn(batch, n, n, device=device) * 0.1).to(dtype).mT.detach().requires_grad_()
+            g = torch.randn_like(a) * 0.2
+            result = torch.linalg.matrix_exp(a)
+            (grad,) = torch.autograd.grad(result, a, g)
+            self.assertEqual(result.shape, a.shape)
+            self.assertEqual(result.dtype, dtype)
+            self.assertEqual(grad.dtype, dtype)
+            if not batch:
+                continue
+            expected = torch.linalg.matrix_exp(a.detach().double()).to(dtype)
+            x, direction = a.detach().mT.double(), g.double()
+            augmented = torch.cat((torch.cat((x, direction), -1),
+                                   torch.cat((torch.zeros_like(x), x), -1)), -2)
+            expected_grad = torch.linalg.matrix_exp(augmented)[..., :n, n:].to(dtype)
+            tol = 1e-3 if dtype == torch.float32 else 0.05
+            for actual, reference, tolerance in ((result, expected, tol), (grad, expected_grad, 5 * tol)):
+                magnitude = 1 + reference.double().abs().flatten(-2).amax(-1)
+                error = (actual.double() - reference.double()).abs().flatten(-2).amax(-1) / magnitude
+                self.assertEqual(error, torch.zeros_like(error), atol=tolerance, rtol=0)
+
     @skipCPUIfNoLapack
     @dtypes(torch.float, torch.complex64)
     def test_linalg_matrix_exp_utils(self, device, dtype):

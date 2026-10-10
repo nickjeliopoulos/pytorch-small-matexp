@@ -1,0 +1,89 @@
+#include <ATen/native/SmallMatrixExp.h>
+
+#ifndef USE_ROCM
+#include <ATen/native/cuda/MatrixExpRows.cuh>
+#include <ATen/native/cuda/MatrixExpScalar.cuh>
+#include <ATen/native/cuda/MatrixExpMma.cuh>
+
+#include <ATen/ops/empty.h>
+#include <ATen/ops/zeros.h>
+
+namespace at::native {
+namespace {
+
+template <int N, bool Pair>
+void launch_small_matrix_exp(
+    const Tensor& x, const Tensor& g, const Tensor& out, bool mma) {
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  const int dtype = out.scalar_type() == kFloat ? 0 : out.scalar_type() == kBFloat16 ? 1 : 2;
+  const float* direction = Pair ? g.const_data_ptr<float>() : nullptr;
+  const auto batch = x.size(0);
+  if constexpr (N <= 8) {
+    constexpr int threads = 128;
+    const auto blocks = (batch * N + threads - 1) / threads;
+    small_matrix_exp::rows::expm_kernel<N, Pair, -1><<<blocks, threads, 0, stream>>>(
+        x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, batch, 0);
+  } else if (mma) {
+#define LAUNCH_MMA(T) small_matrix_exp::mma::mma_kernel<N, T, Pair, false><<<batch, T, 0, stream>>>(x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, true, 0)
+    if constexpr (N == 16) {
+      if (Pair && batch <= 128) { LAUNCH_MMA(64); }
+      else { LAUNCH_MMA(32); }
+    } else {
+      if ((Pair && batch <= 128) || (!Pair && batch <= 32)) { LAUNCH_MMA(128); }
+      else if (Pair || batch <= 2048) { LAUNCH_MMA(64); }
+      else { LAUNCH_MMA(32); }
+    }
+#undef LAUNCH_MMA
+  } else {
+#define LAUNCH_SCALAR(T) small_matrix_exp::scalar::tiled_kernel<N, T, Pair, false><<<batch, T, 0, stream>>>(x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, true, 0)
+    if (batch <= 32) { LAUNCH_SCALAR(256); }
+    else if (N == 32 || batch <= 128) { LAUNCH_SCALAR(128); }
+    else { LAUNCH_SCALAR(64); }
+#undef LAUNCH_SCALAR
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+Tensor prepare_matrix(const Tensor& a, int64_t padded_n) {
+  if (a.size(-1) == padded_n) {
+    return a.to(kFloat).contiguous();
+  }
+  auto result = at::zeros({a.size(0), padded_n, padded_n}, a.options().dtype(kFloat));
+  result.narrow(-2, 0, a.size(-1)).narrow(-1, 0, a.size(-1)).copy_(a);
+  return result;
+}
+
+} // namespace
+
+Tensor small_matrix_exp_cuda(const Tensor& a, const std::optional<Tensor>& direction) {
+  TORCH_CHECK(use_small_matrix_exp(a), "unsupported small matrix exponential input");
+  if (direction) {
+    TORCH_CHECK(direction->sizes() == a.sizes() && direction->device() == a.device() &&
+        direction->scalar_type() == a.scalar_type(), "matrix exponential direction must match the input");
+  }
+  const c10::cuda::CUDAGuard guard(a.device());
+  const auto n = a.size(-1);
+  if (a.numel() == 0) {
+    return at::empty(a.sizes(), a.options());
+  }
+  const int padded_n = n <= 4 ? 4 : n <= 8 ? 8 : n <= 16 ? 16 : 32;
+  const auto x = prepare_matrix(a, padded_n);
+  const auto g = direction ? prepare_matrix(*direction, padded_n) : Tensor();
+  const auto out = at::empty(x.sizes(), a.options());
+  const bool mma = n >= 16 && a.scalar_type() != kFloat &&
+      at::cuda::getDeviceProperties(a.get_device())->major >= 8;
+#define LAUNCH(N) if (direction) launch_small_matrix_exp<N, true>(x, g, out, mma); else launch_small_matrix_exp<N, false>(x, g, out, mma)
+  switch (padded_n) {
+    case 4: { LAUNCH(4); break; }
+    case 8: { LAUNCH(8); break; }
+    case 16: { LAUNCH(16); break; }
+    case 32: { LAUNCH(32); break; }
+  }
+#undef LAUNCH
+  return padded_n == n ? out : out.narrow(-2, 0, n).narrow(-1, 0, n).contiguous();
+}
+
+REGISTER_DISPATCH(small_matrix_exp_stub, &small_matrix_exp_cuda)
+
+} // namespace at::native
+#endif
