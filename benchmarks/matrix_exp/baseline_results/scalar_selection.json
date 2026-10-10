@@ -1,0 +1,17 @@
+{
+  "precision": "FP32 intermediates and scalar FMA for every output dtype",
+  "device_tested": "A100 80GB PCIe SM80",
+  "basis": ["tile_screen.csv", "threshold_screen.csv"],
+  "notes": "One CTA per matrix; simple shared launch policy for forward/backward and all output dtypes. N=4/8 retain the original CUDA kernel. This is an experiment-local candidate, not an ATen registration.",
+  "rules": {
+    "16": [
+      {"max_batch": 32, "variant": "tile_256"},
+      {"max_batch": 128, "variant": "tile_128"},
+      {"max_batch": null, "variant": "tile_64"}
+    ],
+    "32": [
+      {"max_batch": 32, "variant": "tile_256"},
+      {"max_batch": null, "variant": "tile_128"}
+    ]
+  }
+}
