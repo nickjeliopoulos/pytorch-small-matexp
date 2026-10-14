@@ -7,22 +7,26 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/util/bit_cast.h>
+#include <cuda_bf16.h>
+#include <cute/arch/copy_sm75.hpp>
+#include <cute/arch/mma_sm80.hpp>
 #include <cmath>
 
 namespace at::native::small_matrix_exp::mma {
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
 __device__ __forceinline__ uint32_t pack_bf16(float lo, float hi) {
-  uint32_t packed;
-  asm("cvt.rn.bf16x2.f32 %0, %2, %1;" : "=r"(packed) : "f"(lo), "f"(hi));
-  return packed;
+  const __nv_bfloat162_raw packed = __floats2bfloat162_rn(lo, hi);
+  return c10::bit_cast<uint32_t>(packed);
 }
 
 __device__ __forceinline__ void mma16816(
     float* c, const uint32_t* a, const uint32_t* b) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
-      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
-      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+  cute::SM80_16x8x16_F32BF16BF16F32_TN::fma(
+      c[0], c[1], c[2], c[3],
+      a[0], a[1], a[2], a[3],
+      b[0], b[1],
+      c[0], c[1], c[2], c[3]);
 }
 
 template <int N, int Warps, bool Pair>
@@ -73,24 +77,18 @@ struct MmaOps {
   __device__ __forceinline__ void load_b(
       uint32_t* b, int k, int col, int plane) const {
     const int lane = threadIdx.x % 32;
-    const uint32_t addr = uint32_t(__cvta_generic_to_shared(
-        shared + plane * Plane + (k * 16 + lane % 16) * Stride + col * 8));
-    asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];"
-                 : "=r"(b[0]), "=r"(b[1])
-                 : "r"(addr)
-                 : "memory");
+    const auto* src = reinterpret_cast<const cute::uint128_t*>(
+        shared + plane * Plane + (k * 16 + lane % 16) * Stride + col * 8);
+    cute::SM75_U16x4_LDSM_T::copy(*src, b[0], b[1]);
   }
 
   __device__ __forceinline__ void load_b_pair(
       uint32_t* b, int k, int col, int plane) const {
     const int lane = threadIdx.x % 32;
-    const uint32_t addr = uint32_t(__cvta_generic_to_shared(
+    const auto* src = reinterpret_cast<const cute::uint128_t*>(
         shared + plane * Plane + (k * 16 + lane % 16) * Stride +
-        (col + (lane / 16) * WarpN) * 8));
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
-                 : "=r"(b[0]), "=r"(b[1]), "=r"(b[2]), "=r"(b[3])
-                 : "r"(addr)
-                 : "memory");
+        (col + (lane / 16) * WarpN) * 8);
+    cute::SM75_U16x8_LDSM_T::copy(*src, b[0], b[1], b[2], b[3]);
   }
 
   __device__ __forceinline__ void load_a(
@@ -104,13 +102,10 @@ struct MmaOps {
     } else {
       const int lane = threadIdx.x % 32;
       const int global_row = row * WarpM + (threadIdx.x / 32) % WarpM;
-      const uint32_t addr = uint32_t(__cvta_generic_to_shared(
+      const auto* src = reinterpret_cast<const cute::uint128_t*>(
           shared + plane * Plane + (global_row * 16 + lane % 16) * Stride +
-          k * 16 + (lane / 16) * 8));
-      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
-                   : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
-                   : "r"(addr)
-                   : "memory");
+          k * 16 + (lane / 16) * 8);
+      cute::SM75_U32x4_LDSM_N::copy(*src, a[0], a[1], a[2], a[3]);
     }
   }
 

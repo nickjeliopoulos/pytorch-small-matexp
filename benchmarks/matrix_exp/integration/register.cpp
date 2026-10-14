@@ -9,6 +9,7 @@ Tensor small_matrix_exp_cuda(const Tensor&, const std::optional<Tensor>&);
 } // namespace at::native
 
 namespace matrix_exp_aten_probe {
+at::Tensor linalg_matrix_exp(const at::Tensor&);
 at::Tensor linalg_matrix_exp_differential(const at::Tensor&, const at::Tensor&, bool);
 }
 
@@ -26,6 +27,7 @@ at::Tensor frechet(const at::Tensor& a, const at::Tensor& g) {
 
 TORCH_LIBRARY(matrix_exp_aten_probe, m) {
   m.def("forward(Tensor a) -> Tensor");
+  m.def("entry(Tensor a) -> Tensor");
   m.def("frechet(Tensor a, Tensor g) -> Tensor");
   m.def("eligible(Tensor a) -> bool");
   m.def("differential(Tensor a, Tensor g, bool adjoint) -> Tensor");
@@ -33,6 +35,7 @@ TORCH_LIBRARY(matrix_exp_aten_probe, m) {
 
 TORCH_LIBRARY_IMPL(matrix_exp_aten_probe, CompositeImplicitAutograd, m) {
   m.impl("forward", &forward);
+  m.impl("entry", &matrix_exp_aten_probe::linalg_matrix_exp);
   m.impl("frechet", &frechet);
   m.impl("eligible", &at::native::use_small_matrix_exp);
   m.impl("differential", &matrix_exp_aten_probe::linalg_matrix_exp_differential);

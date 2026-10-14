@@ -2820,6 +2820,29 @@ Tensor backward_analytic_function_of_a_matrix(
 // Computing the Matrix Exponential with an Optimized Taylor Polynomial Approximation.
 // Mathematics 2019, 7, 1174.
 //
+// For large batch size and small matrices, we use a simpler kernel with register-based
+// FMA (instead of MMA), and also a mathematical trick to use the same forward kernel 
+// for backward. See related publications. Importantly, this kernel is useful for 
+// residual stream mixing architectures such as Hyperconnections and other variants.
+//
+// Van Loan, C. F.
+// Computing Integrals Involving the Matrix Exponential.
+// IEEE Trans. Autom. Control 1978, 23(3), 395-404.
+//
+// Al-Mohy, A. H.; Higham, N. J.
+// Computing the Frechet Derivative of the Matrix Exponential, with an Application
+// to Condition Number Estimation.
+// SIAM J. Matrix Anal. Appl. 2009, 30(4), 1639-1657, Sections 2 and 7.
+//
+// Related work on residual-stream mixing:
+//
+// Zhu, D.; Huang, H.; Huang, Z.; et al.
+// Hyper-Connections.
+// arXiv 2024, 2409.19606.
+//
+// Xie, Z.; Wei, Y.; Cao, H.; et al.
+// mHC: Manifold-Constrained Hyper-Connections.
+// arXiv 2025, 2512.24880.
 DEFINE_DISPATCH(small_matrix_exp_stub);
 REGISTER_NO_CPU_DISPATCH(small_matrix_exp_stub);
 

@@ -54,6 +54,9 @@ Tensor prepare_matrix(const Tensor& a, int64_t padded_n) {
 
 } // namespace
 
+// `direction` indicates whether we are in "forward" or "backward" mode
+// We materialize A (forward) or products involving an augmented matrix A* (backward)
+// Based on `direction`
 Tensor small_matrix_exp_cuda(const Tensor& a, const std::optional<Tensor>& direction) {
   TORCH_CHECK(use_small_matrix_exp(a), "unsupported small matrix exponential input");
   if (direction) {

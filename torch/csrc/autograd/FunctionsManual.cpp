@@ -4546,8 +4546,8 @@ Tensor linalg_matrix_exp_differential(
     bool adjoint) {
   at::NoTF32Guard disable_tf32;
 
-  // Retain the differentiable augmented-matrix path for higher derivatives
-  // and tensor subclasses. The CUDA kernel computes only the first derivative.
+  // Retain the differentiable augmented-matrix path for higher derivatives and tensor subclasses. 
+  // The CUDA kernel computes only the first derivative.
   if (!at::GradMode::is_enabled() && !areAnyTensorSubclassLike({self, grad}) &&
       at::native::use_small_matrix_exp(self) && grad.sizes() == self.sizes() &&
       grad.device() == self.device() &&

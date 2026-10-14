@@ -2,7 +2,7 @@ import importlib.util
 import warnings
 from contextlib import contextmanager
 
-from matrix_exp_bench.cases import reference
+from matrix_exp_bench.cases import make_input, reference
 
 import torch
 from torch.library import _scoped_library
@@ -41,7 +41,7 @@ def public_forward_override():
             warnings.filterwarnings(
                 "ignore", message=".*Overriding.*", category=UserWarning
             )
-            lib.impl("linalg_matrix_exp", ops.forward)
+            lib.impl("linalg_matrix_exp", ops.entry)
         yield
 
 
@@ -119,6 +119,49 @@ class TestSmallMatrixExpIntegration(TestCase):
         self.assertEqual(ops.forward(a), torch.linalg.matrix_exp(a))
 
     @onlyCUDA
+    @parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_dispatch_by_size(self, device, dtype):
+        from torch.profiler import profile, ProfilerActivity, supported_activities
+
+        if ProfilerActivity.CUDA not in supported_activities():
+            self.skipTest("CUDA kernel tracing requires CUPTI")
+        major = torch.cuda.get_device_capability(device)[0]
+        for n in (0, 1, 2, 8, 9, 15, 16, 32, 33):
+            with self.subTest(n=n):
+                a = (torch.randn(2, n, n, device=device) * 0.03).to(dtype)
+                self.assertEqual(ops.eligible(a), 2 <= n <= 32)
+                with public_forward_override():
+                    torch.linalg.matrix_exp(a)
+                    torch.cuda.synchronize()
+                    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                        result = torch.linalg.matrix_exp(a)
+                        torch.cuda.synchronize()
+                kernels = [
+                    event.name
+                    for event in prof.events()
+                    if event.device_type.name == "CUDA"
+                    and "small_matrix_exp::" in event.name
+                ]
+                if 2 <= n <= 32:
+                    if n <= 8:
+                        regime = "tiny"
+                    elif n >= 16 and dtype != torch.float32 and major >= 8:
+                        regime = "mma"
+                    else:
+                        regime = "scalar"
+                    self.assertEqual(len(kernels), 1, msg=str(kernels))
+                    self.assertIn(f"small_matrix_exp::{regime}::", kernels[0])
+                else:
+                    self.assertEqual(kernels, [])
+                self.assertEqual(result.dtype, dtype)
+                # Stock low-precision accuracy outside the small path is not
+                # part of this dispatch test; still trace its fallback above.
+                if n <= 32 or dtype == torch.float32:
+                    self.check_error(
+                        result, reference(a), 1e-3 if dtype == torch.float32 else 0.05
+                    )
+
+    @onlyCUDA
     def test_public_api(self, device):
         with public_forward_override():
             for dtype in (torch.float32, torch.float16, torch.bfloat16):
@@ -161,6 +204,53 @@ class TestSmallMatrixExpIntegration(TestCase):
             2 * epsilon
         )
         self.check_error(ops.frechet(a, g), numerical, 1e-3)
+
+    @onlyCUDA
+    @parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    @parametrize("n", [4, 8, 16, 32])
+    def test_autograd_against_pytorch(self, device, dtype, n):
+        cases = [
+            (kind, 3.0)
+            for kind in (
+                "random",
+                "skew",
+                "neg_psd",
+                "diagonal",
+                "zero",
+                "identity",
+                "large",
+            )
+        ] + [("large", 12.04028)]
+        for batch in (0, 1, 35, 129):
+            for family, norm in cases:
+                with self.subTest(batch=batch, family=family, norm=norm):
+                    a = (
+                        make_input(
+                            batch, n, dtype, family, norm, seed=841, device=device
+                        )
+                        .mT.detach()
+                        .requires_grad_()
+                    )
+                    baseline = a.detach().clone().requires_grad_()
+                    generator = torch.Generator(device=device).manual_seed(846)
+                    g = (
+                        torch.randn(
+                            a.shape, device=device, dtype=dtype, generator=generator
+                        )
+                        * 0.2
+                    )
+                    actual = IntegratedMatrixExp.apply(a)
+                    # Match the wall benchmark's stock baseline, with no
+                    # public operator override installed in this test.
+                    expected = torch.linalg.matrix_exp(baseline.float()).to(dtype)
+                    actual.backward(g)
+                    expected.backward(g)
+                    self.assertEqual(actual.dtype, dtype)
+                    self.assertEqual(a.grad.dtype, dtype)
+                    tol = 1e-3 if dtype == torch.float32 else 0.05
+                    grad_tol = 5e-3 if dtype == torch.float32 else 0.1
+                    self.check_error(actual, expected, tol)
+                    self.check_error(a.grad, baseline.grad, grad_tol)
 
     @onlyCUDA
     @parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])

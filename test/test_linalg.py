@@ -8120,6 +8120,41 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
                 error = (actual.double() - reference.double()).abs().flatten(-2).amax(-1) / magnitude
                 self.assertEqual(error, torch.zeros_like(error), atol=tolerance, rtol=0)
 
+    @onlyCUDA
+    @skipCUDAIfRocm("small matrix exponential CUDA kernel is NVIDIA-only")
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    def test_linalg_matrix_exp_small_cuda_dispatch(self, device, dtype):
+        from torch.profiler import profile, ProfilerActivity, supported_activities
+
+        if ProfilerActivity.CUDA not in supported_activities():
+            self.skipTest("CUDA kernel tracing requires CUPTI")
+        major = torch.cuda.get_device_capability(device)[0]
+        for n in (0, 1, 2, 8, 9, 15, 16, 32, 33):
+            with self.subTest(n=n):
+                a = (torch.randn(2, n, n, device=device) * 0.03).to(dtype)
+                torch.linalg.matrix_exp(a)
+                torch.cuda.synchronize()
+                with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                    torch.linalg.matrix_exp(a)
+                    torch.cuda.synchronize()
+                kernels = [
+                    event.name
+                    for event in prof.events()
+                    if event.device_type.name == "CUDA"
+                    and "small_matrix_exp::" in event.name
+                ]
+                if 2 <= n <= 32:
+                    if n <= 8:
+                        regime = "tiny"
+                    elif n >= 16 and dtype != torch.float32 and major >= 8:
+                        regime = "mma"
+                    else:
+                        regime = "scalar"
+                    self.assertEqual(len(kernels), 1, msg=str(kernels))
+                    self.assertIn(f"small_matrix_exp::{regime}::", kernels[0])
+                else:
+                    self.assertEqual(kernels, [])
+
     @skipCPUIfNoLapack
     @dtypes(torch.float, torch.complex64)
     def test_linalg_matrix_exp_utils(self, device, dtype):
