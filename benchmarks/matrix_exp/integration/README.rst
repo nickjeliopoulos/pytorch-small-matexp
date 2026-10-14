@@ -11,7 +11,8 @@ internal DispatchStub after its normal validation. No public operator schema,
 dispatcher key, or Python registration changes are required.
 
 ``aten/src/ATen/native/cuda/MatrixExpKernel.cu`` registers the CUDA implementation.
-The adjacent Rows, Scalar, and Mma headers contain the checkpoint algorithms.
+The adjacent ``MatrixExpSmall.cuh`` contains the row and cooperative scalar
+implementations; ``MatrixExpMma.cuh`` contains the MMA implementation.
 All calls use per-matrix adaptive scaling. Non-power-of-two dimensions are
 zero-padded to 4/8/16/32 and cropped afterward; this initial wrapper incurs
 conversion, allocation, and copy costs. Shape, device, and dtype are preserved.

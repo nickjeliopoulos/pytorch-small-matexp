@@ -1,8 +1,7 @@
 #include <ATen/native/SmallMatrixExp.h>
 
 #ifndef USE_ROCM
-#include <ATen/native/cuda/MatrixExpRows.cuh>
-#include <ATen/native/cuda/MatrixExpScalar.cuh>
+#include <ATen/native/cuda/MatrixExpSmall.cuh>
 #include <ATen/native/cuda/MatrixExpMma.cuh>
 
 #include <ATen/ops/empty.h>
@@ -21,7 +20,7 @@ void launch_small_matrix_exp(
   if constexpr (N <= 8) {
     constexpr int threads = 128;
     const auto blocks = (batch * N + threads - 1) / threads;
-    small_matrix_exp::rows::expm_kernel<N, Pair, -1><<<blocks, threads, 0, stream>>>(
+    small_matrix_exp::tiny::expm_kernel<N, Pair, -1><<<blocks, threads, 0, stream>>>(
         x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, batch, 0);
   } else if (mma) {
 #define LAUNCH_MMA(T) small_matrix_exp::mma::mma_kernel<N, T, Pair, false><<<batch, T, 0, stream>>>(x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, true, 0)

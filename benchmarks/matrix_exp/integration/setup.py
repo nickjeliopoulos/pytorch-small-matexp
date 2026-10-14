@@ -13,8 +13,7 @@ ARTIFACTS.mkdir(exist_ok=True)
 overlay = ARTIFACTS / "include"
 for name in (
     "SmallMatrixExp.h",
-    "cuda/MatrixExpRows.cuh",
-    "cuda/MatrixExpScalar.cuh",
+    "cuda/MatrixExpSmall.cuh",
     "cuda/MatrixExpMma.cuh",
 ):
     link = overlay / "ATen/native" / name

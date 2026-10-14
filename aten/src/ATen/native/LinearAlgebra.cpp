@@ -2812,8 +2812,6 @@ Tensor backward_analytic_function_of_a_matrix(
 }
 } // end anon namespace
 
-DEFINE_DISPATCH(small_matrix_exp_stub);
-REGISTER_NO_CPU_DISPATCH(small_matrix_exp_stub);
 
 // Computes the matrix exponential for a given batch of squared matrices.
 // The implementation is based on:
@@ -2822,6 +2820,9 @@ REGISTER_NO_CPU_DISPATCH(small_matrix_exp_stub);
 // Computing the Matrix Exponential with an Optimized Taylor Polynomial Approximation.
 // Mathematics 2019, 7, 1174.
 //
+DEFINE_DISPATCH(small_matrix_exp_stub);
+REGISTER_NO_CPU_DISPATCH(small_matrix_exp_stub);
+
 Tensor linalg_matrix_exp(const Tensor& a) {
   squareCheckInputs(a, "linalg.matrix_exp");
   checkFloatingOrComplex(a, "linalg.matrix_exp");
