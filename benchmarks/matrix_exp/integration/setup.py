@@ -8,16 +8,12 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 NATIVE = REPO / "aten/src/ATen/native"
-CUTLASS = REPO / "third_party/cutlass/include"
-if not (CUTLASS / "cute/arch/mma_sm80.hpp").is_file():
-    raise RuntimeError("Run git submodule update --init third_party/cutlass first")
 ARTIFACTS = HERE / "artifacts"
 ARTIFACTS.mkdir(exist_ok=True)
 overlay = ARTIFACTS / "include"
 for name in (
     "SmallMatrixExp.h",
     "cuda/MatrixExpSmall.cuh",
-    "cuda/MatrixExpMma.cuh",
 ):
     link = overlay / "ATen/native" / name
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -78,7 +74,7 @@ setup(
                 str(entry_probe),
                 str(NATIVE / "cuda/MatrixExpKernel.cu"),
             ],
-            include_dirs=[str(overlay), str(NATIVE), str(CUTLASS)],
+            include_dirs=[str(overlay), str(NATIVE)],
             # Match DispatchStubImpl's ABI in the x86-64 release wheel.
             define_macros=[
                 ("HAVE_AVX2_CPU_DEFINITION", "1"),

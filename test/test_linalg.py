@@ -8095,13 +8095,18 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
         check(2, 3, 5, 5)
 
     @onlyCUDA
-    @skipCUDAIfRocm("small matrix exponential CUDA kernel is NVIDIA-only")
+    @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16, torch.bfloat16)
     @parametrize("n", [2, 3, 4, 7, 8, 13, 16, 23, 32])
-    def test_linalg_matrix_exp_small_cuda(self, device, dtype, n):
+    @parametrize("neg_view", [False, True])
+    def test_linalg_matrix_exp_small_cuda(self, device, dtype, n, neg_view):
         for batch in (0, 35):
-            a = (torch.randn(batch, n, n, device=device) * 0.1).to(dtype).mT.detach().requires_grad_()
+            a = (torch.randn(batch, n, n, device=device) * 0.1).to(dtype).mT.detach()
             g = torch.randn_like(a) * 0.2
+            if neg_view:
+                a = torch._neg_view(a)
+                g = torch._neg_view(g.contiguous())
+            a.requires_grad_()
             result = torch.linalg.matrix_exp(a)
             (grad,) = torch.autograd.grad(result, a, g)
             self.assertEqual(result.shape, a.shape)
@@ -8115,27 +8120,34 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
                                    torch.cat((torch.zeros_like(x), x), -1)), -2)
             expected_grad = torch.linalg.matrix_exp(augmented)[..., :n, n:].to(dtype)
             tol = 1e-3 if dtype == torch.float32 else 0.05
-            for actual, reference, tolerance in ((result, expected, tol), (grad, expected_grad, 5 * tol)):
+            backward_tol = 5e-3 if dtype == torch.float32 else 0.1
+            for actual, reference, tolerance in ((result, expected, tol), (grad, expected_grad, backward_tol)):
                 magnitude = 1 + reference.double().abs().flatten(-2).amax(-1)
                 error = (actual.double() - reference.double()).abs().flatten(-2).amax(-1) / magnitude
                 self.assertEqual(error, torch.zeros_like(error), atol=tolerance, rtol=0)
 
     @onlyCUDA
-    @skipCUDAIfRocm("small matrix exponential CUDA kernel is NVIDIA-only")
+    @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16, torch.bfloat16)
-    def test_linalg_matrix_exp_small_cuda_dispatch(self, device, dtype):
+    @parametrize("operation", ["forward", "backward"])
+    def test_linalg_matrix_exp_small_cuda_dispatch(self, device, dtype, operation):
         from torch.profiler import profile, ProfilerActivity, supported_activities
 
         if ProfilerActivity.CUDA not in supported_activities():
             self.skipTest("CUDA kernel tracing requires CUPTI")
-        major = torch.cuda.get_device_capability(device)[0]
         for n in (0, 1, 2, 8, 9, 15, 16, 32, 33):
             with self.subTest(n=n):
-                a = (torch.randn(2, n, n, device=device) * 0.03).to(dtype)
-                torch.linalg.matrix_exp(a)
+                a = (torch.randn(2, n, n, device=device) * 0.03).to(dtype).requires_grad_()
+                g = torch.randn_like(a) * 0.2
+                result = torch.linalg.matrix_exp(a)
+                if operation == "backward":
+                    torch.autograd.grad(result, a, g, retain_graph=True)
                 torch.cuda.synchronize()
                 with profile(activities=[ProfilerActivity.CUDA]) as prof:
-                    torch.linalg.matrix_exp(a)
+                    if operation == "forward":
+                        torch.linalg.matrix_exp(a)
+                    else:
+                        torch.autograd.grad(result, a, g, retain_graph=True)
                     torch.cuda.synchronize()
                 kernels = [
                     event.name
@@ -8143,17 +8155,50 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
                     if event.device_type.name == "CUDA"
                     and "small_matrix_exp::" in event.name
                 ]
-                if 2 <= n <= 32:
-                    if n <= 8:
+                # The N=1 backward fallback exponentiates a 2x2 augmented matrix.
+                kernel_n = 2 if operation == "backward" and n == 1 else n
+                if 2 <= kernel_n <= 32:
+                    if kernel_n <= 8:
                         regime = "tiny"
-                    elif n >= 16 and dtype != torch.float32 and major >= 8:
-                        regime = "mma"
                     else:
                         regime = "scalar"
                     self.assertEqual(len(kernels), 1, msg=str(kernels))
                     self.assertIn(f"small_matrix_exp::{regime}::", kernels[0])
                 else:
                     self.assertEqual(kernels, [])
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [8, 16, 32])
+    @parametrize("operation", ["forward", "backward"])
+    def test_linalg_matrix_exp_large_rotation(self, device, dtype, n, operation):
+        for batch in (1, 129):
+            for angle in (25, 100, 1000):
+                with self.subTest(batch=batch, angle=angle):
+                    a = torch.zeros(batch, n, n, device=device, dtype=dtype)
+                    a[:, 0, 1], a[:, 1, 0] = -angle, angle
+                    a.requires_grad_()
+                    theta = a[0, 1, 0].item()
+                    expected = torch.eye(n, device=device, dtype=torch.float64).expand_as(a).clone()
+                    expected[:, 0, 0] = expected[:, 1, 1] = math.cos(theta)
+                    expected[:, 0, 1], expected[:, 1, 0] = -math.sin(theta), math.sin(theta)
+                    actual = torch.linalg.matrix_exp(a)
+                    tolerance = 1e-3 if dtype == torch.float32 else 0.05
+                    if operation == "backward":
+                        g = (0.125 * torch.eye(n, device=device, dtype=dtype)).expand_as(a)
+                        (actual,) = torch.autograd.grad(actual, a, g)
+                        # L_exp(A.T, c I) = c exp(A.T).
+                        expected = 0.125 * expected.mT
+                        tolerance = 5e-3 if dtype == torch.float32 else 0.1
+                    self.assertEqual(actual.dtype, dtype)
+                    magnitude = 1 + expected.abs().flatten(-2).amax(-1)
+                    error = (actual.double() - expected).abs().flatten(-2).amax(-1) / magnitude
+                    self.assertEqual(error, torch.zeros_like(error), atol=tolerance, rtol=0)
+                    if operation == "forward":
+                        identity = torch.eye(n, device=device, dtype=torch.float64).expand_as(a)
+                        self.assertEqual(actual.double().mT @ actual.double(), identity,
+                                         atol=2 * tolerance, rtol=0)
 
     @skipCPUIfNoLapack
     @dtypes(torch.float, torch.complex64)

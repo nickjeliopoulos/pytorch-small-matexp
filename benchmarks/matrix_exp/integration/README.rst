@@ -8,22 +8,19 @@ internal DispatchStub after its normal validation. No public operator schema,
 dispatcher key, or Python registration changes are required.
 
 ``aten/src/ATen/native/cuda/MatrixExpKernel.cu`` registers the CUDA implementation.
-The adjacent ``MatrixExpSmall.cuh`` contains the row and cooperative scalar
-implementations; ``MatrixExpMma.cuh`` contains the MMA implementation.
-The MMA implementation uses the pinned CUTLASS submodule's CuTe SM80 BF16
-MMA and SM75 matrix-load intrinsics. Fragment layouts and launch geometry
-remain local to the matrix exponential kernel.
+The adjacent ``MatrixExpSmall.cuh`` contains the tiny and cooperative scalar
+implementations. Both use FP32 scalar FMA products throughout the polynomial
+and repeated squaring.
 All calls use per-matrix adaptive scaling. Non-power-of-two dimensions are
 zero-padded to 4/8/16/32 and cropped afterward; this initial wrapper incurs
 conversion, allocation, and copy costs. Shape, device, and dtype are preserved.
 
-FP32 uses scalar arithmetic. FP16 and BF16 use FP32 scalar intermediates below
-N=16 and BF16 MMA operands with FP32 accumulation from N=16 on SM80 or newer.
-BF16 intermediates with FP16 output are explicitly permitted by the experimental
-precision policy. Older devices, and PTX compiled for an older target, use
-scalar arithmetic. ROCm and inputs outside the predicate retain stock ATen.
-Low-precision MMA accuracy remains experimental; dtype preservation does not
-establish upstream numerical acceptance.
+FP32, FP16, and BF16 inputs use FP32 intermediates, with conversion to the input
+dtype only at the output store. N<=8 uses the tiny kernel; larger supported
+dimensions use the cooperative scalar kernel. The BF16 MMA implementation was
+removed from ATen after large-angle rotation regressions exposed severe forward
+and backward errors. Historical MMA experiments remain in the standalone
+benchmark checkpoint. ROCm and inputs outside the predicate retain stock ATen.
 
 ``FunctionsManual.cpp`` uses the structured Frechet recurrence for ordinary
 first derivatives. Higher derivatives retain the differentiable augmented
@@ -48,7 +45,6 @@ environment active::
 
     export MAX_JOBS=2
     export TORCH_CUDA_ARCH_LIST='7.5;8.0+PTX'
-    git -C ../../.. submodule update --init third_party/cutlass
     python -m pip install -e . -v --no-build-isolation
     python test_integration.py -v
 
@@ -61,10 +57,13 @@ second derivatives. Overrides live only in the test process and are removed
 when each test context exits.
 
 Profiler-based dispatch tests check N=0/1/2, 8/9, 15/16, and 32/33. Eligible
-inputs must launch exactly one kernel in the expected tiny, scalar, or MMA
+inputs must launch exactly one kernel in the expected tiny or scalar
 namespace; ineligible sizes must launch none of these kernels. CUDA kernel
 tracing requires CUPTI. The corresponding core test is
-``test_linalg_matrix_exp_small_cuda_dispatch`` in ``test/test_linalg.py``.
+``test_linalg_matrix_exp_small_cuda_dispatch`` in ``test/test_linalg.py`` checks
+both forward and backward. ``test_linalg_matrix_exp_large_rotation`` checks
+analytic forward and backward values and orthogonality at angles 25, 100, and
+1000 for N=8/16/32, all three dtypes, and batches 1/129.
 
 On gilbreth-i004 (A100 SM80), all 19 probe tests passed after the CuTe migration.
 Both SM75 and SM80 targets compiled; SM75 was not tested on hardware.
@@ -130,13 +129,14 @@ Defaults are three alternating-order trials of 25 calls for each
 N=4/8/16/32 and B=1/32/256/1024/2048/4096/8192/16384/32768/65536/120064.
 FP32 uses ``torch.linalg.matrix_exp(a)`` directly. The separately labeled BF16
 and FP16 baselines use ``torch.linalg.matrix_exp(a.float()).to(a.dtype)``, with
-both casts included in the timing. Their internal precision therefore differs
-from our BF16 MMA path. All cases use identical prescribed-1-norm-3 inputs.
+both casts included in the timing. The integrated kernel also uses FP32
+intermediates. All cases use identical prescribed-1-norm-3 inputs.
 Results are saved per operation/trial/backend and can be resumed with the same binary,
 PyTorch version, GPU model, and sample count.
 Older forward-only CSVs are migrated by adding ``operation=fwd`` to their rows.
 
-The A100 measurements, absolute-time and speedup figures for each dtype, and
+The historical A100 measurements below predate removal of BF16 MMA from ATen.
+The absolute-time and speedup figures for each dtype, and
 complete CSVs are in ``agent_space/matrix_exp_compare/cute_migration/pytorch_wall/``.
 Across the FP32 sweep, our synchronized forward wall time was 9.05x to 75.26x
 faster. These measurements include dispatch and launch savings; they are not

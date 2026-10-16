@@ -2,7 +2,6 @@
 
 #ifndef USE_ROCM
 #include <ATen/native/cuda/MatrixExpSmall.cuh>
-#include <ATen/native/cuda/MatrixExpMma.cuh>
 
 #include <ATen/ops/empty.h>
 #include <ATen/ops/zeros.h>
@@ -12,7 +11,7 @@ namespace {
 
 template <int N, bool Pair>
 void launch_small_matrix_exp(
-    const Tensor& x, const Tensor& g, const Tensor& out, bool mma) {
+    const Tensor& x, const Tensor& g, const Tensor& out) {
   const auto stream = at::cuda::getCurrentCUDAStream();
   const int dtype = out.scalar_type() == kFloat ? 0 : out.scalar_type() == kBFloat16 ? 1 : 2;
   const float* direction = Pair ? g.const_data_ptr<float>() : nullptr;
@@ -22,17 +21,6 @@ void launch_small_matrix_exp(
     const auto blocks = (batch * N + threads - 1) / threads;
     small_matrix_exp::tiny::expm_kernel<N, Pair, -1><<<blocks, threads, 0, stream>>>(
         x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, batch, 0);
-  } else if (mma) {
-#define LAUNCH_MMA(T) small_matrix_exp::mma::mma_kernel<N, T, Pair, false><<<batch, T, 0, stream>>>(x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, true, 0)
-    if constexpr (N == 16) {
-      if (Pair && batch <= 128) { LAUNCH_MMA(64); }
-      else { LAUNCH_MMA(32); }
-    } else {
-      if ((Pair && batch <= 128) || (!Pair && batch <= 32)) { LAUNCH_MMA(128); }
-      else if (Pair || batch <= 2048) { LAUNCH_MMA(64); }
-      else { LAUNCH_MMA(32); }
-    }
-#undef LAUNCH_MMA
   } else {
 #define LAUNCH_SCALAR(T) small_matrix_exp::scalar::tiled_kernel<N, T, Pair, false><<<batch, T, 0, stream>>>(x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, true, 0)
     if (batch <= 32) { LAUNCH_SCALAR(256); }
@@ -45,7 +33,9 @@ void launch_small_matrix_exp(
 
 Tensor prepare_matrix(const Tensor& a, int64_t padded_n) {
   if (a.size(-1) == padded_n) {
-    return a.to(kFloat).contiguous();
+    // Contiguous FP32 views can still carry a lazy negative bit. The kernel
+    // reads raw storage, so materialize that bit before passing its pointer.
+    return a.to(kFloat).contiguous().resolve_neg();
   }
   auto result = at::zeros({a.size(0), padded_n, padded_n}, a.options().dtype(kFloat));
   result.narrow(-2, 0, a.size(-1)).narrow(-1, 0, a.size(-1)).copy_(a);
@@ -72,9 +62,7 @@ Tensor small_matrix_exp_cuda(const Tensor& a, const std::optional<Tensor>& direc
   const auto x = prepare_matrix(a, padded_n);
   const auto g = direction ? prepare_matrix(*direction, padded_n) : Tensor();
   const auto out = at::empty(x.sizes(), a.options());
-  const bool mma = n >= 16 && a.scalar_type() != kFloat &&
-      at::cuda::getDeviceProperties(a.get_device())->major >= 8;
-#define LAUNCH(N) if (direction) launch_small_matrix_exp<N, true>(x, g, out, mma); else launch_small_matrix_exp<N, false>(x, g, out, mma)
+#define LAUNCH(N) if (direction) launch_small_matrix_exp<N, true>(x, g, out); else launch_small_matrix_exp<N, false>(x, g, out)
   switch (padded_n) {
     case 4: { LAUNCH(4); break; }
     case 8: { LAUNCH(8); break; }

@@ -125,7 +125,6 @@ class TestSmallMatrixExpIntegration(TestCase):
 
         if ProfilerActivity.CUDA not in supported_activities():
             self.skipTest("CUDA kernel tracing requires CUPTI")
-        major = torch.cuda.get_device_capability(device)[0]
         for n in (0, 1, 2, 8, 9, 15, 16, 32, 33):
             with self.subTest(n=n):
                 a = (torch.randn(2, n, n, device=device) * 0.03).to(dtype)
@@ -145,8 +144,6 @@ class TestSmallMatrixExpIntegration(TestCase):
                 if 2 <= n <= 32:
                     if n <= 8:
                         regime = "tiny"
-                    elif n >= 16 and dtype != torch.float32 and major >= 8:
-                        regime = "mma"
                     else:
                         regime = "scalar"
                     self.assertEqual(len(kernels), 1, msg=str(kernels))
