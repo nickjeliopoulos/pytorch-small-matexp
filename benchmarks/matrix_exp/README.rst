@@ -50,12 +50,19 @@ The repository uses ``pip install -e . -v --no-build-isolation`` for builds::
     export MAX_JOBS=2
     python -m pip install -e . -v --no-build-isolation
     python test_matrix_exp.py -v
+    python test_validate.py -v
     python validate.py --backends scalar --output results/scalar_correctness.csv
     python validate.py --backends mma --dtype bf16 fp16 --output results/mma_correctness.csv
 
 The extension uses optimized compilation with line information, preserved PTX
 and cubins, and verbose assembler resource reports. Broad fast-math is disabled.
 Dependencies are PyTorch, setuptools, ninja, NumPy, Triton, and expecttest.
+
+Validation always recomputes every requested case and replaces its aggregate
+CSV, per-matrix CSV, and summary. It does not support resuming. The previous
+summary is removed before computation so an interrupted run cannot retain an
+earlier success result. Acceptance failures return a nonzero exit status;
+fixed-scaling stress cases remain reported separately.
 
 The API is experiment-local::
 

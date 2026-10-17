@@ -19,12 +19,14 @@ def main():
     )
     p.add_argument("--batch", type=int, default=33)
     p.add_argument("--output", default="results/correctness.csv")
-    p.add_argument("--resume", action="store_true")
     args = p.parse_args()
     torch.set_float32_matmul_precision("highest")
     torch.set_num_threads(2)
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path = path.with_suffix(".summary.json")
+    # An interrupted run must not leave a success summary from an earlier run.
+    summary_path.unlink(missing_ok=True)
     writer = None
     failures = []
     key_fields = (
@@ -39,14 +41,6 @@ def main():
         "operation",
         "category",
     )
-    done = set()
-    had_header = args.resume and path.exists() and path.stat().st_size > 0
-    if had_header:
-        with path.open() as existing:
-            for row in csv.DictReader(existing):
-                done.add(tuple(str(row[k]) for k in key_fields))
-                if row["category"] == "acceptance" and row["passed"] != "True":
-                    failures.append(row)
     matrix_fields = list(key_fields) + [
         "matrix_index",
         "max_abs_err",
@@ -56,9 +50,8 @@ def main():
         "tolerance",
         "passed",
     ]
-    # Recomputed on resume so the sidecar and original batch indices remain complete.
     with (
-        path.open("a" if args.resume else "w", newline="") as stream,
+        path.open("w", newline="") as stream,
         path.with_name(path.stem + "_per_matrix.csv").open(
             "w", newline=""
         ) as matrix_stream,
@@ -206,24 +199,18 @@ def main():
                                             }
                                         )
                                     matrix_stream.flush()
-                                    row_key = tuple(str(row[k]) for k in key_fields)
-                                    if row_key in done:
-                                        continue
                                     if writer is None:
                                         writer = csv.DictWriter(
                                             stream, fieldnames=list(row)
                                         )
-                                        if not had_header:
-                                            writer.writeheader()
-                                            had_header = True
+                                        writer.writeheader()
                                     writer.writerow(row)
                                     stream.flush()
-                                    done.add(row_key)
                                     if category == "acceptance" and not passed:
                                         failures.append(row)
                                         print("FAIL", json.dumps(row), flush=True)
                 print(f"completed N={n} {dtype_name}", flush=True)
-    path.with_suffix(".summary.json").write_text(
+    summary_path.write_text(
         json.dumps({"failures": failures, "passed": not failures}, indent=2)
     )
     print(f"Acceptance failures: {len(failures)}; report: {path}")

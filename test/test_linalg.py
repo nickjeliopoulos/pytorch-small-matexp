@@ -8129,6 +8129,35 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
     @onlyCUDA
     @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [3, 4, 13, 16, 32])
+    def test_linalg_matrix_exp_small_cuda_negative_grad(self, device, dtype, n):
+        a = torch.zeros(1, n, n, device=device, dtype=dtype, requires_grad=True)
+        g = torch._neg_view(torch.ones_like(a))
+        self.assertTrue(g.is_neg())
+        self.assertTrue(g.is_contiguous())
+        (actual,) = torch.autograd.grad(torch.linalg.matrix_exp(a), a, g)
+        self.assertEqual(actual, -torch.ones_like(a))
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32)
+    @parametrize("n", [4, 16, 32])
+    @parametrize("tangent_arg", ["input", "grad", "both"])
+    def test_linalg_matrix_exp_small_cuda_forward_over_reverse(self, device, dtype, n, tangent_arg):
+        a = torch.zeros(1, n, n, device=device, dtype=dtype, requires_grad=True)
+        identity = torch.eye(n, device=device, dtype=dtype).unsqueeze(0)
+        with fwAD.dual_level():
+            x = fwAD.make_dual(a, identity) if tangent_arg in ("input", "both") else a
+            g = fwAD.make_dual(identity, identity) if tangent_arg in ("grad", "both") else identity
+            (gradient,) = torch.autograd.grad(torch.linalg.matrix_exp(x), x, g, create_graph=False)
+            primal, tangent = fwAD.unpack_dual(gradient)
+            self.assertIsNotNone(tangent)
+            self.assertEqual(primal, identity)
+            self.assertEqual(tangent, (2 if tangent_arg == "both" else 1) * identity)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
     @parametrize("operation", ["forward", "backward"])
     def test_linalg_matrix_exp_small_cuda_dispatch(self, device, dtype, operation):
         from torch.profiler import profile, ProfilerActivity, supported_activities
