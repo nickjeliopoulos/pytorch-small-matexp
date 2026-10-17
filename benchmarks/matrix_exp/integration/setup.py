@@ -32,10 +32,10 @@ manual_probe = ARTIFACTS / "manual.cpp"
 manual_probe.write_text(
     "#include <ATen/ATen.h>\n#include <ATen/TensorSubclassLikeUtils.h>\n"
     "#include <ATen/core/grad_mode.h>\n"
+    "#include <torch/csrc/autograd/functions/utils.h>\n"
     '#include "SmallMatrixExp.h"\nnamespace matrix_exp_aten_probe {\n'
     "using at::Tensor;\nusing at::areAnyTensorSubclassLike;\n"
-    + manual[start:end]
-    + "\n}\n"
+    "using torch::autograd::isFwGradDefined;\n" + manual[start:end] + "\n}\n"
 )
 
 # Exercise the actual size guard and trivial cases from the public entry point.

@@ -8158,6 +8158,68 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
     @onlyCUDA
     @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [4, 16, 32])
+    @parametrize("operation", ["grad", "jvp_grad"])
+    def test_linalg_matrix_exp_small_cuda_func_derivatives(self, device, dtype, n, operation):
+        identity = torch.eye(n, device=device, dtype=dtype).unsqueeze(0)
+
+        def trace_exp(a):
+            return torch.linalg.matrix_exp(a).diagonal(dim1=-2, dim2=-1).sum()
+
+        for diagonal in (torch.zeros(n, device=device, dtype=dtype),
+                         torch.linspace(-0.2, 0.2, n, device=device, dtype=dtype)):
+            a = diagonal.diag().unsqueeze(0)
+            # At a diagonal A, grad(trace(exp(A))) = exp(A). The derivative
+            # of this gradient in the identity direction is also exp(A).
+            expected = diagonal.double().exp().diag().unsqueeze(0).to(dtype)
+            if operation == "grad":
+                actual = torch.func.grad(trace_exp)(a)
+            else:
+                primal, actual = torch.func.jvp(torch.func.grad(trace_exp), (a,), (identity,))
+                self.assertEqual(primal, expected)
+            self.assertEqual(actual.dtype, dtype)
+            self.assertEqual(actual, expected)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16, torch.float64)
+    @parametrize("batch_kind", ["backed", "unbacked"])
+    def test_linalg_matrix_exp_small_cuda_symbolic_batch(self, device, dtype, batch_kind):
+        from torch._dynamo.source import ConstantSource
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import DimDynamic, ShapeEnv, StatelessSymbolicContext
+
+        shape_env = ShapeEnv()
+        mode = FakeTensorMode(shape_env=shape_env)
+        if batch_kind == "unbacked":
+            batch = shape_env.create_unbacked_symint()
+            shape_env.constrain_symbol_range(batch.node.expr, compiler_min=2, compiler_max=100)
+            with mode:
+                a = torch.empty(batch, 4, 4, device=device, dtype=dtype)
+        else:
+            cpu = mode.from_tensor(
+                torch.empty(3, 4, 4, dtype=dtype),
+                static_shapes=False,
+                source=ConstantSource("matrix"),
+                symbolic_context=StatelessSymbolicContext(
+                    dynamic_sizes=[DimDynamic.DYNAMIC, DimDynamic.STATIC, DimDynamic.STATIC]),
+            )
+            with mode:
+                a = torch.empty_like(cpu, device=device)
+        batch_expr = a.shape[0].node.expr
+
+        def trace_exp(x):
+            return torch.linalg.matrix_exp(x).diagonal(dim1=-2, dim2=-1).sum()
+
+        with mode:
+            gradient = torch.func.grad(trace_exp)(a)
+        self.assertIsInstance(gradient.shape[0], torch.SymInt)
+        self.assertEqual(gradient.shape[0].node.expr, batch_expr)
+        self.assertEqual(shape_env.guards, [])
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
     @parametrize("operation", ["forward", "backward"])
     def test_linalg_matrix_exp_small_cuda_dispatch(self, device, dtype, operation):
         from torch.profiler import profile, ProfilerActivity, supported_activities

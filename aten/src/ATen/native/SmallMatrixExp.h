@@ -8,9 +8,10 @@ namespace at::native {
 
 inline bool use_small_matrix_exp(const Tensor& a) {
   const auto dtype = a.scalar_type();
-  return a.is_cuda() && a.layout() == kStrided && a.dim() == 3 &&
-      a.size(-1) == a.size(-2) && a.size(-1) > 1 && a.size(-1) <= 32 &&
-      (dtype == kFloat || dtype == kHalf || dtype == kBFloat16) &&
+  return (dtype == kFloat || dtype == kHalf || dtype == kBFloat16) &&
+      a.is_cuda() && a.layout() == kStrided && a.dim() == 3 &&
+      a.sym_size(-1) == a.sym_size(-2) && a.sym_size(-1) > 1 &&
+      a.sym_size(-1) <= 32 &&
       !at::globalContext().hasROCM();
 }
 

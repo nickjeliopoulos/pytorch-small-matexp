@@ -7,7 +7,6 @@ import json
 import platform
 from pathlib import Path
 
-from compare import MatrixExp
 from matrix_exp_bench.cases import DTYPE_MAP, make_input, reference
 
 import torch
@@ -32,7 +31,13 @@ def errors(actual, expected):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--library", type=Path, required=True)
+    implementation = parser.add_mutually_exclusive_group(required=True)
+    implementation.add_argument("--library", type=Path)
+    implementation.add_argument(
+        "--native",
+        action="store_true",
+        help="Test the installed public API against its rank-4 fallback",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--n", type=int, nargs="+", default=[4, 8, 16, 32])
     parser.add_argument(
@@ -47,19 +52,45 @@ def main():
     args = parser.parse_args()
     torch.set_num_threads(2)
     torch.set_float32_matmul_precision("highest")
-    torch.ops.load_library(str(args.library.resolve()))
+    if args.native:
+        forward = torch.linalg.matrix_exp
+
+        def baseline_forward(a):
+            return (
+                torch.linalg.matrix_exp(a.float().unsqueeze(0)).squeeze(0).to(a.dtype)
+            )
+    else:
+        from compare import MatrixExp
+
+        torch.ops.load_library(str(args.library.resolve()))
+        forward = MatrixExp.apply
+
+        def baseline_forward(a):
+            return torch.linalg.matrix_exp(a.float()).to(a.dtype)
+
     args.output.mkdir(parents=True, exist_ok=True)
     metadata = dict(
         host=platform.node(),
         gpu=torch.cuda.get_device_name(),
         torch=torch.__version__,
-        library=str(args.library.resolve()),
-        library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest(),
+        git=torch.version.git_version,
+        torch_file=torch.__file__,
+        library=str(args.library.resolve()) if args.library else None,
+        library_sha256=hashlib.sha256(args.library.read_bytes()).hexdigest()
+        if args.library
+        else None,
         args={
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
         },
-        baseline="torch.linalg.matrix_exp(a.float()).to(a.dtype), including autograd through casts",
+        baseline=(
+            "Same-build rank-4 fallback: torch.linalg.matrix_exp(a.float().unsqueeze(0)).squeeze(0).to(a.dtype)"
+            if args.native
+            else "torch.linalg.matrix_exp(a.float()).to(a.dtype), including autograd through casts"
+        ),
+        implementation="Installed public API and generated autograd"
+        if args.native
+        else "ATen extension probe",
         metric="max_abs_error_per_matrix / (1 + max_abs_reference_per_matrix)",
         fp64="All matrices in family sweep; first 32 matrices in timing-grid cases",
         grad="torch.autograd.grad with identical random upstream gradients",
@@ -110,8 +141,8 @@ def main():
                         )
                         * 0.2
                     )
-                    y = MatrixExp.apply(ours)
-                    expected = torch.linalg.matrix_exp(stock.float()).to(dtype)
+                    y = forward(ours)
+                    expected = baseline_forward(stock)
                     (grad,) = torch.autograd.grad(y, ours, g)
                     (expected_grad,) = torch.autograd.grad(expected, stock, g)
                     sample = batch if suite == "families" else min(32, batch)

@@ -1,6 +1,94 @@
 ATen integration draft
 ======================
 
+Installed-build validation
+--------------------------
+
+The public-API tests and timing scripts in this directory are part of the source
+checkout. They do not need the standalone probe. After configuring the source
+build environment, build from the repository root with::
+
+    python -m pip install -e . -v --no-build-isolation
+
+Run ``spin`` lint commands before rebuilding that checkout: their setup
+regenerates ``torch/version.py`` without the CUDA build metadata. Running them
+during or after the build can make an editable CUDA installation report
+``torch.version.cuda is None``. The build restores the configured metadata;
+verify it with the import check below before testing or building the probe.
+
+Activate that installation's environment. Set ``repo`` to its source checkout
+and run from outside the checkout so that Python cannot accidentally import a
+different local ``torch`` directory::
+
+    repo=/path/to/pytorch-source
+    results="$repo/agent_space/matrix_exp_compare/source_build/validation"
+    export PYTHONPATH="$repo/benchmarks/matrix_exp"
+    export PYTORCH_TEST_WITH_SLOW=1
+    export MATRIX_EXP_TRACE_DIR="$results/traces"
+    cd /tmp
+    python -c 'import torch; print(torch.__version__, torch.version.git_version, torch.__file__, torch._C.__file__, torch.version.cuda); print(torch.cuda.get_device_name())'
+    python "$repo/benchmarks/matrix_exp/integration/test_native.py" -v
+    python "$repo/test/test_linalg.py" -v -k matrix_exp
+    python "$repo/test/test_ops_gradients.py" -v -k matrix_exp
+    python "$repo/benchmarks/matrix_exp/test_validate.py" -v
+    python "$repo/benchmarks/matrix_exp/integration/test_timing_metadata.py" -v
+    python "$repo/benchmarks/matrix_exp/integration/validate_pytorch.py" --native --output "$results/errors"
+
+``test_native.py`` uses the installed public API and ordinary autograd without
+overrides. The core linalg suite also checks low-precision ``torch.func.grad``
+and ``torch.func.jvp(torch.func.grad(...))`` against analytic diagonal cases.
+Profiler tests require CUPTI and verify both forward and backward routing.
+Numerical validation recomputes every case and overwrites its CSV; failures
+produce a failing exit status. There is no correctness-resume option.
+The same-build rank-4 FP32 path is a numerical control, not a timing backend.
+
+Record ``git rev-parse HEAD``, ``git diff --binary``, untracked source files,
+the build log, environment, and hashes of the tested source and loaded shared
+libraries with each run. An editable build's version string identifies its
+base commit; it does not identify subsequent uncommitted source changes.
+Verify those changes were copied to the build checkout and recompiled.
+Building PyTorch does not rebuild the separate probe described below.
+
+Installed-build timing comparison
+---------------------------------
+
+For the installed custom PyTorch build, activate its environment and run::
+
+    bash benchmarks/matrix_exp/integration/run_timings.sh /path/to/results /path/to/stock-venv/bin/python
+
+The two backends are ``torch_small_n`` (our integrated CUDA kernel) and
+``torch_linalg`` (the stock PyTorch 2.14.1 release). The runner executes three
+trials in alternating order and generates forward/backward figures for FP32,
+BF16, and FP16. Completed cases are resumable; use a fresh output directory
+to collect new measurements. Both backends use identical saved input tensors.
+The runner and summarizer require matching environment metadata across all
+trials of each backend, including both CPU/autograd and CUDA library hashes.
+Existing timing CSVs without their metadata are rejected.
+
+``wall_summary.csv`` contains ``n``, ``dtype``, ``batch``, ``operation``,
+``torch_small_n_median_ms``, ``torch_linalg_median_ms``, and ``speedup``.
+Each reported time is the median of three trial medians. Speedup is
+``torch_linalg_median_ms / torch_small_n_median_ms``. Detailed per-trial statistics
+and all 25 samples remain in ``wall_timings.csv``.
+
+``benchmark_native.py --backend torch_small_n|torch_linalg --trial 0 --output /path/to/results/timings``
+runs one backend/trial; run ``torch_linalg`` first to generate the shared inputs.
+The Python executable selects the installed package, so run ``torch_linalg``
+with the stock environment and ``torch_small_n`` with the custom environment.
+Set ``PYTHONPATH`` to ``benchmarks/matrix_exp`` for direct script invocation.
+``summarize_native.py --output /path/to/results`` regenerates the timing report,
+CSV summaries, and figures after the complete sweep. Numerical validation is
+separate and is not required by the timing summarizer.
+
+The timings include allocations, conversions, dispatch, and synchronization.
+Backward times only ``autograd.grad`` with its forward graph prepared beforehand.
+For BF16/FP16, ``torch_linalg`` computes in FP32 and casts back, including autograd
+through those conversions. The standalone extension workflow below is separate
+from this installed-public-API comparison.
+
+Kernel integration
+------------------
+
 ``aten/src/ATen/native/SmallMatrixExp.h`` defines the predicate: strided NVIDIA
 CUDA inputs shaped [B,N,N], 2<=N<=32, with FP32, FP16, or BF16 dtype. N=0 and N=1
 retain the existing trivial implementations. ``LinearAlgebra.cpp`` calls an
@@ -25,8 +113,9 @@ benchmark checkpoint. ROCm and inputs outside the predicate retain stock ATen.
 ``FunctionsManual.cpp`` uses the structured Frechet recurrence for ordinary
 first derivatives. Higher derivatives retain the differentiable augmented
 matrix construction, promoting low-precision augmented inputs to FP32 before
-the exponential. Tensor subclasses retain the original path. These guards
-avoid replacing higher derivatives with a non-differentiable custom launch.
+the exponential. Tensor subclasses, including ``torch.func`` wrappers, use
+this differentiable operator-based path with the same precision policy.
+Forward tangents on either argument also prevent the raw structured shortcut.
 
 Isolated validation
 -------------------
@@ -39,6 +128,9 @@ It exercises the DispatchStub against an installed PyTorch wheel. It does not
 compile all of ``LinearAlgebra.cpp``, generated autograd registrations, or
 libtorch, and therefore is not a replacement for a full PyTorch build and CI.
 The probe's CPU dispatch ABI flags target the x86-64 release wheel used here.
+Build and test it separately; a successful full PyTorch rebuild does not
+validate this generated translation unit. Its extracted derivative imports
+the autograd forward-tangent helper explicitly.
 
 From this directory, with the checkpoint package installed and the same CUDA
 environment active::
@@ -65,7 +157,7 @@ both forward and backward. ``test_linalg_matrix_exp_large_rotation`` checks
 analytic forward and backward values and orthogonality at angles 25, 100, and
 1000 for N=8/16/32, all three dtypes, and batches 1/129.
 
-On gilbreth-i004 (A100 SM80), all 19 probe tests passed after the CuTe migration.
+Historically, on gilbreth-i004 (A100 SM80), all 19 probe tests passed after the CuTe migration.
 Both SM75 and SM80 targets compiled; SM75 was not tested on hardware.
 The new core dispatch test body also passed against the extracted entry point
 for all three dtypes. ``torch.compile`` was tested

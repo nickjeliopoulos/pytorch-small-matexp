@@ -281,6 +281,32 @@ class TestSmallMatrixExpIntegration(TestCase):
                 self.check_error(second, second64, tol)
 
     @onlyCUDA
+    @parametrize("tangent_arg", ["input", "grad", "both"])
+    def test_manual_forward_tangents(self, device, tangent_arg):
+        for n in (4, 16, 32):
+            a = torch.zeros(1, n, n, device=device)
+            identity = torch.eye(n, device=device).unsqueeze(0)
+            with torch.no_grad(), torch.autograd.forward_ad.dual_level():
+                x = (
+                    torch.autograd.forward_ad.make_dual(a, identity)
+                    if tangent_arg in ("input", "both")
+                    else a
+                )
+                g = (
+                    torch.autograd.forward_ad.make_dual(identity, identity)
+                    if tangent_arg in ("grad", "both")
+                    else identity
+                )
+                primal, tangent = torch.autograd.forward_ad.unpack_dual(
+                    ops.differential(x, g, True)
+                )
+                self.assertIsNotNone(tangent)
+                self.assertEqual(primal, identity)
+                self.assertEqual(
+                    tangent, (2 if tangent_arg == "both" else 1) * identity
+                )
+
+    @onlyCUDA
     def test_compile_export_and_vmap(self, device):
         class Model(torch.nn.Module):
             def forward(self, a):
