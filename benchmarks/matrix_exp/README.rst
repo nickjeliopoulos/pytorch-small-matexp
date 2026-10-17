@@ -6,6 +6,15 @@ integration. It builds against an installed PyTorch release and does not
 override ``torch.linalg.matrix_exp``. No files under ``agent_space`` are
 required to build or run it.
 
+``benchmarks/matrix_exp`` is our research tooling, added on this branch. It can
+be omitted from the upstream kernel PR; production regression coverage lives
+in ``test/test_linalg.py``. The parent ``benchmarks`` directory is part of PyTorch.
+
+For the integrated build, ``integration/run_timings.sh`` generates the wall-time
+CSVs, fresh per-matrix numerical comparisons, empirical error CDFs, and
+speedup-versus-error plots in one run. See ``integration/README.rst`` for commands,
+output names, and plotting an existing report without rerunning GPU measurements.
+
 The CUDA sources are copied from the validated experiment, with local variable
 names adjusted for repository lint. Python sources have repository formatting.
 ``provenance.json`` records original and checkpoint hashes. The measured batch-65,536 summary,
@@ -61,8 +70,11 @@ Dependencies are PyTorch, setuptools, ninja, NumPy, Triton, and expecttest.
 Validation always recomputes every requested case and replaces its aggregate
 CSV, per-matrix CSV, and summary. It does not support resuming. The previous
 summary is removed before computation so an interrupted run cannot retain an
-earlier success result. Acceptance failures return a nonzero exit status;
-fixed-scaling stress cases remain reported separately.
+earlier completed result. These commands report errors without acceptance
+thresholds or pass/fail labels. Summaries rank the largest per-matrix errors
+and list nonfinite cases; per-matrix CSVs retain the complete measurements.
+Fixed-scaling stress cases remain separate from in-range inputs. Execution
+errors still return a nonzero status. Regression tests retain their assertions.
 
 The API is experiment-local::
 

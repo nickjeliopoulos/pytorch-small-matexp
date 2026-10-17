@@ -32,14 +32,17 @@ different local ``torch`` directory::
     python "$repo/test/test_ops_gradients.py" -v -k matrix_exp
     python "$repo/benchmarks/matrix_exp/test_validate.py" -v
     python "$repo/benchmarks/matrix_exp/integration/test_timing_metadata.py" -v
+    python "$repo/benchmarks/matrix_exp/integration/test_accuracy_reporting.py" -v
     python "$repo/benchmarks/matrix_exp/integration/validate_pytorch.py" --native --output "$results/errors"
 
 ``test_native.py`` uses the installed public API and ordinary autograd without
 overrides. The core linalg suite also checks low-precision ``torch.func.grad``
 and ``torch.func.jvp(torch.func.grad(...))`` against analytic diagonal cases.
 Profiler tests require CUPTI and verify both forward and backward routing.
-Numerical validation recomputes every case and overwrites its CSV; failures
-produce a failing exit status. There is no correctness-resume option.
+Numerical reporting recomputes every case and overwrites its CSV. It reports
+error distributions, nonfinite values and worst cases without accuracy
+thresholds or a pass/fail verdict. Execution errors produce a failing exit
+status. There is no numerical-report resume option.
 The same-build rank-4 FP32 path is a numerical control, not a timing backend.
 
 Record ``git rev-parse HEAD``, ``git diff --binary``, untracked source files,
@@ -59,17 +62,70 @@ For the installed custom PyTorch build, activate its environment and run::
 The two backends are ``torch_small_n`` (our integrated CUDA kernel) and
 ``torch_linalg`` (the stock PyTorch 2.14.1 release). The runner executes three
 trials in alternating order and generates forward/backward figures for FP32,
-BF16, and FP16. Completed cases are resumable; use a fresh output directory
+BF16, and FP16. It then collects fresh per-matrix errors against stock PyTorch
+and generates empirical CDF and speedup-versus-error figures in ``accuracy/``.
+Completed timing cases are resumable; use a fresh output directory
 to collect new measurements. Both backends use identical saved input tensors.
 The runner and summarizer require matching environment metadata across all
 trials of each backend, including both CPU/autograd and CUDA library hashes.
 Existing timing CSVs without their metadata are rejected.
+Shared hardware and measurement settings must also match between backends.
+
+``wall_manifest.json`` accompanies the CSVs and figures. It contains UTC dates,
+GPU model/capability/memory, source checkout revisions and patch/source hashes,
+loaded library hashes, settings, commands, all trial metadata, and hashes of
+the generated reports. Keep the manifest with the reports when sharing them.
+Stable filenames remain convenient to script; the manifest identifies their
+contents unambiguously, including uncommitted changes in an editable build.
+Older trials lacking this metadata require a fresh run; metadata is not invented
+retroactively. The manifest is invalidated when measurements or summaries restart.
 
 ``wall_summary.csv`` contains ``n``, ``dtype``, ``batch``, ``operation``,
 ``torch_small_n_median_ms``, ``torch_linalg_median_ms``, and ``speedup``.
 Each reported time is the median of three trial medians. Speedup is
 ``torch_linalg_median_ms / torch_small_n_median_ms``. Detailed per-trial statistics
 and all 25 samples remain in ``wall_timings.csv``.
+These are the timing CSV filenames; the runner does not write ``wall_time.csv``.
+
+The numerical stage runs the stock and custom installations in separate
+processes. It uses four matrix families at six prescribed norms, high-norm
+skew/negative-semidefinite/rotation cases through norm 1000, and zero/identity
+cases. It computes forward and autograd backward errors for the dimensions and
+dtypes in the timing grid. Every numerical run starts over; there is no accuracy
+resume option. Nonfinite results remain visible without an accuracy pass/fail
+threshold. Execution or provenance errors fail the runner.
+
+``accuracy/per_matrix_errors.csv`` records relative Frobenius error for each
+matrix, together with the earlier magnitude-normalized metric. Each CDF sample
+is one matrix. Exact matches are plotted at zero; the axis is linear up to
+1e-10 and logarithmic above it. Nonfinite/undefined values remain in the CDF
+denominator. The speedup-versus-error scatter uses the maximum per-matrix error
+at batch size 8192, or the largest measured batch if 8192 is absent. It uses the
+exact saved timing inputs and checks input/gradient hashes across all six trials.
+Its 24 points for the default grid are saved in ``accuracy/speedup_accuracy.csv``.
+
+Seven figures are written as PNG, PDF, and SVG: forward/backward overviews,
+forward/backward CDFs by family/norm/dtype, forward/backward stress CDFs, and a
+combined speedup-versus-error plot. ``accuracy/figure_manifest.json`` binds
+these files to the timing manifest and numerical metadata. It is only written
+after a complete report; stale or incomplete numerical data are rejected.
+
+Additional timing arguments are forwarded to each trial, which also determines
+the numerical reporting grid. For a small end-to-end run::
+
+    bash benchmarks/matrix_exp/integration/run_timings.sh /path/to/smoke-results /path/to/stock-venv/bin/python --n 4 8 --dtype fp32 --batch 1 32 --samples 3
+
+Regenerate figures from a completed run without a GPU or new measurements::
+
+    python benchmarks/matrix_exp/integration/plot_accuracy.py --output /path/to/results
+
+To refresh the numerical data while keeping an existing timing run, execute
+``measure_accuracy.py reference --output /path/to/results`` using the stock
+Python, followed by ``measure_accuracy.py compare --output /path/to/results``
+using the custom Python, then run ``plot_accuracy.py``. Both installed library
+hashes and GPU properties must match the recorded timing run. The collector
+also accepts ``--matrices`` and ``--timing-batch``; supply the same options to
+both stages. Plotting requires NumPy, Matplotlib, and PyTorch.
 
 ``benchmark_native.py --backend torch_small_n|torch_linalg --trial 0 --output /path/to/results/timings``
 runs one backend/trial; run ``torch_linalg`` first to generate the shared inputs.
@@ -77,8 +133,9 @@ The Python executable selects the installed package, so run ``torch_linalg``
 with the stock environment and ``torch_small_n`` with the custom environment.
 Set ``PYTHONPATH`` to ``benchmarks/matrix_exp`` for direct script invocation.
 ``summarize_native.py --output /path/to/results`` regenerates the timing report,
-CSV summaries, and figures after the complete sweep. Numerical validation is
-separate and is not required by the timing summarizer.
+CSV summaries, and figures after all three trials of the declared grid. Smaller
+grids supplied to ``benchmark_native.py`` are supported too. The timing summarizer
+can run independently; ``run_timings.sh`` invokes the accuracy stages afterward.
 
 The timings include allocations, conversions, dispatch, and synchronization.
 Backward times only ``autograd.grad`` with its forward graph prepared beforehand.
@@ -115,6 +172,9 @@ first derivatives. Higher derivatives retain the differentiable augmented
 matrix construction, promoting low-precision augmented inputs to FP32 before
 the exponential. Tensor subclasses, including ``torch.func`` wrappers, use
 this differentiable operator-based path with the same precision policy.
+For strided NVIDIA CUDA low-precision derivatives, promotion is independent of
+matrix size and batch rank, so hidden ``vmap`` dimensions and symbolic matrix
+sizes do not accidentally disable it. Raw-kernel eligibility remains unchanged.
 Forward tangents on either argument also prevent the raw structured shortcut.
 
 Isolated validation
@@ -257,8 +317,13 @@ reference value in that matrix. Every matrix is compared against stock PyTorch.
 FP64 checks additionally cover all family-sweep matrices and the first 32
 matrices of each timing-grid case; their sample counts are explicit in the CSV.
 
-Forward acceptance tolerances are 0.001 (FP32) and 0.05 (BF16/FP16); backward
-tolerances are 0.005 and 0.1, respectively, retaining the integration test's
-experimental precision policy. The command exits unsuccessfully if any
-comparison fails and saves the failing inputs and outputs. Detailed results
-are in ``agent_space/matrix_exp_compare/cute_migration/pytorch_errors/``.
+These measurements do not assign acceptable-error thresholds or pass/fail
+labels. ``numerical_summary.json`` ranks the largest errors and lists nonfinite
+cases. Median/p95 statistics cover finite matrices explicitly, with separate
+counts for nonfinite actual/reference matrices. The worst input, upstream
+gradient, output and reference of every comparison are saved as ``worst_*.pt``.
+A completed report is not a correctness endorsement. Core PyTorch regression
+tests still assert their specified mathematical and API behavior.
+
+This directory is our research tooling, not a required part of the upstream
+kernel PR. The production source and core tests can be submitted separately.

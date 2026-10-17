@@ -5,12 +5,19 @@ import csv
 import hashlib
 import json
 import platform
+import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 from matrix_exp_bench.cases import DTYPE_MAP, make_input
-from timing_metadata import check_environment, load_timing_metadata
+from timing_metadata import (
+    check_environment,
+    check_shared_settings,
+    load_timing_metadata,
+    source_identity,
+)
 
 import torch
 
@@ -59,7 +66,17 @@ def main():
         cuda=torch.version.cuda,
         library_sha256=library_sha256,
         gpu=torch.cuda.get_device_name(),
+        gpu_capability=list(torch.cuda.get_device_capability()),
+        gpu_memory_bytes=torch.cuda.get_device_properties(0).total_memory,
         host=platform.node(),
+        num_threads=torch.get_num_threads(),
+        matmul_precision=torch.get_float32_matmul_precision(),
+        allow_tf32=torch.backends.cuda.matmul.allow_tf32,
+        grid=dict(
+            n=args.n, dtype=args.dtype, batch=args.batch, operation=["fwd", "bwd"]
+        ),
+        runner_source=source_identity(Path(__file__).parent),
+        torch_checkout=source_identity(Path(torch.__file__).parent),
         input="seed 841, prescribed 1-norm 3; upstream seed 846, normal times 0.2",
         scope="perf_counter + CUDA synchronize; allocations, conversions, dispatch, autograd included",
         backward="autograd.grad(retain_graph=True); forward graph built outside timing",
@@ -72,6 +89,19 @@ def main():
         check_environment(load_timing_metadata(path), metadata)
     for previous_path in args.output.glob(f"{args.backend}_trial*.json"):
         check_environment(json.loads(previous_path.read_text()), metadata)
+    for previous_path in args.output.glob("*_trial*.json"):
+        check_shared_settings(json.loads(previous_path.read_text()), metadata)
+    now = datetime.now(timezone.utc).isoformat()
+    previous_metadata = load_timing_metadata(path) if path.exists() else {}
+    metadata["started_at_utc"] = previous_metadata.get("started_at_utc", now)
+    metadata["invocations"] = previous_metadata.get("invocations", []) + [
+        dict(
+            started_at_utc=now,
+            host=platform.node(),
+            command=[sys.executable, *sys.argv],
+        )
+    ]
+    (args.output.parent / "wall_manifest.json").unlink(missing_ok=True)
     with (args.output / "runs.jsonl").open("a") as f:
         f.write(json.dumps(dict(timestamp=time.time(), **metadata)) + "\n")
     meta_path.write_text(json.dumps(metadata, indent=2))
@@ -222,6 +252,8 @@ def main():
                             operation,
                             flush=True,
                         )
+    metadata["completed_at_utc"] = datetime.now(timezone.utc).isoformat()
+    meta_path.write_text(json.dumps(metadata, indent=2))
 
 
 if __name__ == "__main__":

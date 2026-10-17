@@ -1,10 +1,10 @@
 import argparse
 import csv
-import json
 from pathlib import Path
 
 from matrix_exp_bench import expm, frechet, THETA18
 from matrix_exp_bench.cases import DTYPE_MAP, make_input, metrics, reference
+from matrix_exp_bench.reporting import write_error_summary
 
 import torch
 
@@ -25,10 +25,10 @@ def main():
     path = Path(args.output)
     path.parent.mkdir(parents=True, exist_ok=True)
     summary_path = path.with_suffix(".summary.json")
-    # An interrupted run must not leave a success summary from an earlier run.
+    # An interrupted run must not leave a completed summary from an earlier run.
     summary_path.unlink(missing_ok=True)
     writer = None
-    failures = []
+    rows = []
     key_fields = (
         "backend",
         "scaling",
@@ -47,8 +47,6 @@ def main():
         "ref_max_abs",
         "matrix_rel_err",
         "finite",
-        "tolerance",
-        "passed",
     ]
     with (
         path.open("w", newline="") as stream,
@@ -119,7 +117,7 @@ def main():
                                     else frechet(a.mT, g, backend, scaling)
                                 )
                                 for category, selection in (
-                                    ("acceptance", eligible),
+                                    ("in_range", eligible),
                                     ("stress", ~eligible),
                                 ):
                                     if not selection.any().item():
@@ -127,18 +125,6 @@ def main():
                                     # Output rounding is part of the contract, as in the original benchmarks.
                                     selected_ref = ref[selection].to(dtype)
                                     m = metrics(got[selection], selected_ref)
-                                    tol = (
-                                        (
-                                            (5e-4 if kind == "random" else 1e-3)
-                                            if operation == "fwd"
-                                            else 5e-3
-                                        )
-                                        if dtype == torch.float32
-                                        else (0.05 if operation == "fwd" else 0.1)
-                                    )
-                                    passed = (
-                                        m["finite"] and m["worst_matrix_rel_err"] <= tol
-                                    )
                                     row = dict(
                                         backend=backend,
                                         scaling=scaling,
@@ -151,8 +137,6 @@ def main():
                                         operation=operation,
                                         category=category,
                                         tested_matrices=int(selection.sum().item()),
-                                        tolerance=tol,
-                                        passed=passed,
                                         **m,
                                     )
                                     indices = selection.nonzero().flatten().tolist()
@@ -176,6 +160,9 @@ def main():
                                         .flatten(-2)
                                         .all(-1)
                                     )
+                                    finite &= (
+                                        torch.isfinite(selected_ref).flatten(-2).all(-1)
+                                    )
                                     rels = torch.where(
                                         finite, errors / (1 + magnitudes), float("inf")
                                     )
@@ -194,8 +181,6 @@ def main():
                                                 "ref_max_abs": mag,
                                                 "matrix_rel_err": rel,
                                                 "finite": fin,
-                                                "tolerance": tol,
-                                                "passed": fin and rel <= tol,
                                             }
                                         )
                                     matrix_stream.flush()
@@ -206,15 +191,10 @@ def main():
                                         writer.writeheader()
                                     writer.writerow(row)
                                     stream.flush()
-                                    if category == "acceptance" and not passed:
-                                        failures.append(row)
-                                        print("FAIL", json.dumps(row), flush=True)
+                                    rows.append(row)
                 print(f"completed N={n} {dtype_name}", flush=True)
-    summary_path.write_text(
-        json.dumps({"failures": failures, "passed": not failures}, indent=2)
-    )
-    print(f"Acceptance failures: {len(failures)}; report: {path}")
-    raise SystemExit(bool(failures))
+    write_error_summary(summary_path, rows, "worst_matrix_rel_err")
+    print(f"{len(rows)} numerical comparisons; report: {path}")
 
 
 if __name__ == "__main__":

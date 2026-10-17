@@ -47,12 +47,23 @@ def metrics(got, expected):
     per_err = diff.flatten(-2).amax(-1)
     per_mag = ref.abs().flatten(-2).amax(-1)
     rel = per_err / (1 + per_mag)
-    valid = torch.isfinite(got).flatten(-2).all(-1)
+    actual_finite = torch.isfinite(got).flatten(-2).all(-1)
+    reference_finite = torch.isfinite(ref).flatten(-2).all(-1)
+    valid = actual_finite & reference_finite
     rel = torch.where(valid, rel, float("inf"))
+    finite_errors = rel[valid]
     return dict(
         max_err=per_err.max().item(),
         global_rel_err=(per_err.max() / (1 + per_mag.max())).item(),
         worst_matrix_rel_err=rel.max().item(),
         worst_matrix_index=rel.argmax().item(),
         finite=bool(valid.all().item()),
+        actual_nonfinite_matrices=int((~actual_finite).sum().item()),
+        reference_nonfinite_matrices=int((~reference_finite).sum().item()),
+        median_finite_matrix_rel_err=finite_errors.median().item()
+        if finite_errors.numel()
+        else float("nan"),
+        p95_finite_matrix_rel_err=torch.quantile(finite_errors, 0.95).item()
+        if finite_errors.numel()
+        else float("nan"),
     )

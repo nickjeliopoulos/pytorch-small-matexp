@@ -36,8 +36,9 @@ for runnable validation and timing commands.
 5. The raw structured derivative is only for ordinary first derivatives:
    reverse-mode recording, forward tangents on either argument, and tensor
    subclasses must retain a differentiable operator-based path. Low-precision
-   promotion on that path must also work with `torch.func` wrappers. Eligibility
-   checks must preserve symbolic batch dimensions instead of specializing them.
+   promotion on that path must also work with `torch.func` and `vmap` wrappers.
+   The operator-based promotion policy must not depend on raw-kernel shape
+   eligibility. Preserve symbolic batch and matrix dimensions.
 6. Device guards and launches must use the correct CUDA device and current
    stream; graph capture must not introduce host synchronization.
 
@@ -55,10 +56,11 @@ for runnable validation and timing commands.
   forward-over-reverse AD, and `torch.func.grad` / `torch.func.jvp(grad)`.
   At `A=0`, the gradient of `trace(exp(A))` and its derivative in direction `I`
   both equal `I`. Double-only gradchecks cannot cover this CUDA fast path.
-- Regenerate correctness results from scratch. Keep failures visible, return
-  a failing status, and invalidate completed summaries if a run is interrupted.
-  Acceptance limits remain 0.001/0.005 for FP32 forward/backward and 0.05/0.1
-  for low precision. Stress cases and tolerances must be labeled explicitly.
+- Regenerate numerical benchmark reports from scratch. Report error
+  distributions, worst cases, and nonfinite values without accuracy thresholds
+  or pass/fail labels. Separate fixed-scaling stress cases from in-range inputs.
+  Execution errors still fail the command; interrupted runs invalidate completed
+  summaries. Core regression tests retain assertions for their specified behavior.
 - Rebuild the standalone probe separately when its source extraction changes.
   Its generated derivative needs the correct namespace and headers for
   autograd helpers. Passing the full build does not establish probe validity;
@@ -69,6 +71,8 @@ for runnable validation and timing commands.
   cannot by itself prove which patched source was compiled.
 - Keep reusable tests and runners in the tracked repository. Put binaries,
   traces, CSVs, plots, and machine-specific logs in ignored `agent_space/`.
+  `benchmarks/matrix_exp/` is local research tooling; it need not accompany the
+  production source and `test/test_linalg.py` in the eventual upstream PR.
 
 ## Performance comparisons
 
@@ -80,3 +84,7 @@ wall-time samples. Report `operation=fwd` or `bwd`; backward excludes preparatio
 of its forward graph. Include wrapper costs and record build/version differences.
 Do not present historical MMA measurements as results for the current FP32
 implementation or use timing success as evidence of numerical correctness.
+Keep a `wall_manifest.json` beside the timing reports with UTC timestamps,
+device and timing settings, source revisions/patch hashes, loaded library hashes,
+trial metadata, and artifact hashes. Compare shared measurement settings across
+backends as well as build identity within each backend's trials.

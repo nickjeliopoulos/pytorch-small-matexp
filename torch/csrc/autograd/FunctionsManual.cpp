@@ -4557,12 +4557,13 @@ Tensor linalg_matrix_exp_differential(
         at::kCUDA, adjoint ? self.mH() : self, grad);
   }
 
-  // Keep FP32 intermediates for low-precision derivatives, including tensor
-  // subclasses used by torch.func. This operator-based path remains
-  // differentiable and lets subclasses dispatch the casts and matrix function.
+  // Promotion is independent of raw-kernel eligibility: vmap hides batch
+  // dimensions, and symbolic matrix sizes must not require a concrete guard.
+  // Keep this operator-based path differentiable for higher derivatives.
   if ((self.scalar_type() == at::kHalf ||
        self.scalar_type() == at::kBFloat16) &&
-      at::native::use_small_matrix_exp(self)) {
+      self.is_cuda() && self.layout() == at::kStrided &&
+      !at::globalContext().hasROCM()) {
     return differential_analytic_matrix_function(
         self,
         grad,

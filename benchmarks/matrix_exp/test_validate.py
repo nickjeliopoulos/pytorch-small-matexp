@@ -46,43 +46,47 @@ class TestMatrixExpValidation(TestCase):
                 str(path),
             ]
             row_counts = None
-            for fail in (False, True, False):
+            for nonfinite in (False, True, False):
 
-                def result(a, backend, scaling, fail=fail):
+                def result(a, backend, scaling, nonfinite=nonfinite):
                     return (
                         torch.full_like(a, float("nan"))
-                        if fail
-                        else validate.reference(a).to(a.dtype)
+                        if nonfinite
+                        else validate.reference(a).to(a.dtype) + 10
                     )
 
                 with (
                     mock.patch.object(sys, "argv", argv),
                     mock.patch.object(validate, "expm", side_effect=result),
                     contextlib.redirect_stdout(io.StringIO()),
-                    self.assertRaises(SystemExit) as raised,
                 ):
                     validate.main()
-                self.assertEqual(raised.exception.code, int(fail))
                 counts = []
                 for report in (path, path.with_name("correctness_per_matrix.csv")):
                     with report.open() as stream:
                         rows = list(csv.DictReader(stream))
                     self.assertTrue(rows)
-                    self.assertTrue(all(row["passed"] == str(not fail) for row in rows))
+                    self.assertNotIn("passed", rows[0])
+                    self.assertNotIn("tolerance", rows[0])
+                    self.assertTrue(
+                        all(row["finite"] == str(not nonfinite) for row in rows)
+                    )
                     counts.append(len(rows))
                 if row_counts is None:
                     row_counts = counts
                 self.assertEqual(counts, row_counts)
                 summary = json.loads(path.with_suffix(".summary.json").read_text())
-                self.assertEqual(summary["passed"], not fail)
-                self.assertEqual(bool(summary["failures"]), fail)
+                self.assertEqual(summary["status"], "complete")
+                self.assertEqual(bool(summary["nonfinite_comparisons"]), nonfinite)
+                self.assertTrue(summary["largest_errors"])
+                self.assertNotIn("passed", summary)
 
     @onlyCUDA
     def test_interruption_invalidates_summary(self, device):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "correctness.csv"
             summary = path.with_suffix(".summary.json")
-            summary.write_text(json.dumps({"passed": True, "failures": []}))
+            summary.write_text(json.dumps({"status": "complete"}))
             with (
                 mock.patch.object(
                     sys,

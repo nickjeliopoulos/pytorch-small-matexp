@@ -8159,23 +8159,31 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
     @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16, torch.bfloat16)
     @parametrize("n", [4, 16, 32])
-    @parametrize("operation", ["grad", "jvp_grad"])
+    @parametrize("operation", ["grad", "jvp_grad", "vmap_grad", "vmap_jvp_grad", "jvp_vmap_grad"])
     def test_linalg_matrix_exp_small_cuda_func_derivatives(self, device, dtype, n, operation):
-        identity = torch.eye(n, device=device, dtype=dtype).unsqueeze(0)
+        identity = torch.eye(n, device=device, dtype=dtype).expand(3, n, n)
 
         def trace_exp(a):
             return torch.linalg.matrix_exp(a).diagonal(dim1=-2, dim2=-1).sum()
 
         for diagonal in (torch.zeros(n, device=device, dtype=dtype),
                          torch.linspace(-0.2, 0.2, n, device=device, dtype=dtype)):
-            a = diagonal.diag().unsqueeze(0)
+            a = diagonal.diag().expand(3, n, n)
             # At a diagonal A, grad(trace(exp(A))) = exp(A). The derivative
             # of this gradient in the identity direction is also exp(A).
-            expected = diagonal.double().exp().diag().unsqueeze(0).to(dtype)
-            if operation == "grad":
-                actual = torch.func.grad(trace_exp)(a)
+            expected = diagonal.double().exp().diag().expand_as(a).to(dtype)
+            gradient = torch.func.grad(trace_exp)
+            if operation in ("vmap_grad", "jvp_vmap_grad"):
+                gradient = torch.vmap(gradient)
+            if operation in ("grad", "vmap_grad"):
+                actual = gradient(a)
+            elif operation == "vmap_jvp_grad":
+                primal, actual = torch.vmap(
+                    lambda x, tangent: torch.func.jvp(gradient, (x,), (tangent,))
+                )(a, identity)
+                self.assertEqual(primal, expected)
             else:
-                primal, actual = torch.func.jvp(torch.func.grad(trace_exp), (a,), (identity,))
+                primal, actual = torch.func.jvp(gradient, (a,), (identity,))
                 self.assertEqual(primal, expected)
             self.assertEqual(actual.dtype, dtype)
             self.assertEqual(actual, expected)
@@ -8215,6 +8223,26 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
             gradient = torch.func.grad(trace_exp)(a)
         self.assertIsInstance(gradient.shape[0], torch.SymInt)
         self.assertEqual(gradient.shape[0].node.expr, batch_expr)
+        self.assertEqual(shape_env.guards, [])
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16, torch.float64)
+    @parametrize("batch_rank", [0, 1, 2])
+    def test_linalg_matrix_exp_small_cuda_symbolic_matrix_size(self, device, dtype, batch_rank):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        shape_env = ShapeEnv()
+        mode = FakeTensorMode(shape_env=shape_env)
+        n = shape_env.create_unbacked_symint()
+        shape_env.constrain_symbol_range(n.node.expr, compiler_min=2, compiler_max=100)
+        with mode:
+            a = torch.empty([3] * batch_rank + [n, n], device=device, dtype=dtype)
+            gradient = torch.func.grad(lambda x: torch.linalg.matrix_exp(x).sum())(a)
+        for dim in (-2, -1):
+            self.assertIsInstance(gradient.shape[dim], torch.SymInt)
+            self.assertEqual(gradient.shape[dim].node.expr, n.node.expr)
         self.assertEqual(shape_env.guards, [])
 
     @onlyCUDA

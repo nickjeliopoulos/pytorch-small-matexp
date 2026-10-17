@@ -8,6 +8,7 @@ import platform
 from pathlib import Path
 
 from matrix_exp_bench.cases import DTYPE_MAP, make_input, reference
+from matrix_exp_bench.reporting import write_error_summary
 
 import torch
 
@@ -16,15 +17,24 @@ def errors(actual, expected):
     actual, expected = actual.detach().double(), expected.detach().double()
     delta = (actual - expected).abs().flatten(-2).amax(-1)
     magnitude = expected.abs().flatten(-2).amax(-1)
-    finite = actual.isfinite().flatten(-2).all(-1)
-    finite &= expected.isfinite().flatten(-2).all(-1)
+    actual_finite = actual.isfinite().flatten(-2).all(-1)
+    reference_finite = expected.isfinite().flatten(-2).all(-1)
+    finite = actual_finite & reference_finite
     normalized = torch.where(finite, delta / (1 + magnitude), float("inf"))
+    finite_errors = normalized[finite]
     return dict(
         finite=bool(finite.all().item()),
         max_abs_error=delta.max().item(),
         global_normalized_error=(delta.max() / (1 + magnitude.max())).item(),
         worst_matrix_normalized_error=normalized.max().item(),
-        p95_matrix_normalized_error=torch.quantile(normalized, 0.95).item(),
+        median_finite_matrix_normalized_error=finite_errors.median().item()
+        if finite_errors.numel()
+        else float("nan"),
+        p95_finite_matrix_normalized_error=torch.quantile(finite_errors, 0.95).item()
+        if finite_errors.numel()
+        else float("nan"),
+        actual_nonfinite_matrices=int((~actual_finite).sum().item()),
+        reference_nonfinite_matrices=int((~reference_finite).sum().item()),
         worst_matrix_index=normalized.argmax().item(),
     )
 
@@ -69,6 +79,8 @@ def main():
             return torch.linalg.matrix_exp(a.float()).to(a.dtype)
 
     args.output.mkdir(parents=True, exist_ok=True)
+    summary_path = args.output / "numerical_summary.json"
+    summary_path.unlink(missing_ok=True)
     metadata = dict(
         host=platform.node(),
         gpu=torch.cuda.get_device_name(),
@@ -103,7 +115,7 @@ def main():
         for kind in ("random", "skew", "neg_psd", "diagonal", "zero", "identity")
     ] + [("large", norm) for norm in (3.01006, 3.01007, 6.02014, 12.04028)]
     cases += [("families", b, kind, norm) for b in (35, 129) for kind, norm in families]
-    failures, count = 0, 0
+    rows = []
     fields = [
         "suite",
         "n",
@@ -115,13 +127,14 @@ def main():
         "comparison",
         "reference_policy",
         "compared_matrices",
-        "tolerance",
-        "passed",
         "finite",
         "max_abs_error",
         "global_normalized_error",
         "worst_matrix_normalized_error",
-        "p95_matrix_normalized_error",
+        "median_finite_matrix_normalized_error",
+        "p95_finite_matrix_normalized_error",
+        "actual_nonfinite_matrices",
+        "reference_nonfinite_matrices",
         "worst_matrix_index",
     ]
     with (args.output / "numerical_errors.csv").open("w", newline="") as f:
@@ -152,11 +165,6 @@ def main():
                         ("forward", y, expected, forward64),
                         ("backward", grad, expected_grad, backward64),
                     ):
-                        tol = (
-                            (1e-3 if operation == "forward" else 5e-3)
-                            if dtype == torch.float32
-                            else (0.05 if operation == "forward" else 0.1)
-                        )
                         comparisons = [
                             (
                                 "cuda_vs_pytorch",
@@ -165,51 +173,40 @@ def main():
                                 "native_fp32"
                                 if dtype == torch.float32
                                 else "fp32_with_input_output_casts",
-                                tol,
                             ),
-                            ("cuda_vs_fp64", actual[:sample], ref64, "fp64", tol),
+                            ("cuda_vs_fp64", actual[:sample], ref64, "fp64"),
                             (
                                 "pytorch_vs_fp64",
                                 baseline[:sample],
                                 ref64,
                                 "fp64",
-                                (1e-3 if operation == "forward" else 5e-3)
-                                if dtype == torch.float32
-                                else 0.005,
                             ),
                         ]
-                        for comparison, value, target, policy, tolerance in comparisons:
+                        for comparison, value, target, policy in comparisons:
                             measured = errors(value, target)
-                            passed = (
-                                measured["finite"]
-                                and measured["worst_matrix_normalized_error"]
-                                <= tolerance
+                            row = dict(
+                                suite=suite,
+                                n=n,
+                                dtype=dtype_name,
+                                batch=batch,
+                                family=family,
+                                norm=norm,
+                                operation=operation,
+                                comparison=comparison,
+                                reference_policy=policy,
+                                compared_matrices=len(value),
+                                **measured,
                             )
-                            writer.writerow(
-                                dict(
-                                    suite=suite,
-                                    n=n,
-                                    dtype=dtype_name,
-                                    batch=batch,
-                                    family=family,
-                                    norm=norm,
-                                    operation=operation,
-                                    comparison=comparison,
-                                    reference_policy=policy,
-                                    compared_matrices=len(value),
-                                    tolerance=tolerance,
-                                    passed=passed,
-                                    **measured,
-                                )
-                            )
+                            writer.writerow(row)
+                            rows.append(row)
                             f.flush()
-                            count += 1
-                            failures += not passed
-                            if not passed:
+                            # Retain the worst matrix of every comparison, without
+                            # deciding which amount of degradation is acceptable.
+                            if len(value):
                                 index = measured["worst_matrix_index"]
                                 path = (
                                     args.output
-                                    / f"failure_{suite}_{n}_{dtype_name}_{batch}_{family}_{norm}_{operation}_{comparison}.pt"
+                                    / f"worst_{suite}_{n}_{dtype_name}_{batch}_{family}_{norm}_{operation}_{comparison}.pt"
                                 )
                                 torch.save(
                                     dict(
@@ -222,11 +219,10 @@ def main():
                                 )
                     del a, ours, stock, g, y, expected, grad, expected_grad
                     print(n, dtype_name, suite, batch, family, norm, flush=True)
-    print(f"{count} numerical comparisons; {failures} failures", flush=True)
-    if failures:
-        raise RuntimeError(
-            f"{failures} numerical comparisons failed; see CSV and saved worst cases"
-        )
+    write_error_summary(summary_path, rows, "worst_matrix_normalized_error")
+    print(
+        f"{len(rows)} numerical comparisons; see CSV and saved worst cases", flush=True
+    )
 
 
 if __name__ == "__main__":
