@@ -1,13 +1,16 @@
 import csv
 import hashlib
 import json
+import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 import matplotlib.pyplot as plt
 import numpy as np
 from measure_accuracy import load_manifest, matrix_errors, specs
 from plot_accuracy import accuracy_points, cdf, load_measurements
+import validate_pytorch
 
 import torch
 from torch.testing._internal.common_utils import (
@@ -20,6 +23,36 @@ from torch.testing._internal.common_utils import (
 
 @instantiate_parametrized_tests
 class TestAccuracyReporting(TestCase):
+    @parametrize("probe_state", ["missing", "invalid"])
+    def test_failed_probe_load_invalidates_summary(self, probe_state):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            summary = root / "numerical_summary.json"
+            summary.write_text(json.dumps({"status": "complete"}))
+            library = root / "probe.so"
+            if probe_state == "invalid":
+                library.write_text("invalid shared library")
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "validate_pytorch.py",
+                        "--library",
+                        str(library),
+                        "--output",
+                        str(root),
+                    ],
+                ),
+                mock.patch.object(torch, "set_num_threads"),
+                mock.patch.object(torch, "set_float32_matmul_precision"),
+                self.assertRaisesRegex(
+                    OSError, r"Could not load this library: .*probe\.so"
+                ),
+            ):
+                validate_pytorch.main()
+            self.assertFalse(summary.exists())
+
     def test_relative_error_is_per_matrix(self):
         reference = torch.tensor([[[3.0, 4.0]], [[0.003, 0.004]]])
         actual = reference * 2

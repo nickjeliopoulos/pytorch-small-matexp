@@ -304,7 +304,7 @@ def main():
             )
         ax.axvline(1, color="#666666", linestyle="--", linewidth=1.2)
         ax.set_xscale("log")
-        ax.set_xlim(0.75, max(p["speedup"] for p in subset) * 1.35)
+        ax.set_xlim(min(p["speedup"] for p in subset) * 0.90, max(p["speedup"] for p in subset) * 1.35)
         format_error_axis(ax, which="y", upper=upper)
         min_y = min(finite_errors, default=0)
         if min_y > 0:

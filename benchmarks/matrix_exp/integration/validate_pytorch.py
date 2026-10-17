@@ -60,6 +60,9 @@ def main():
         default=[1, 32, 256, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 120064],
     )
     args = parser.parse_args()
+    args.output.mkdir(parents=True, exist_ok=True)
+    summary_path = args.output / "numerical_summary.json"
+    summary_path.unlink(missing_ok=True)
     torch.set_num_threads(2)
     torch.set_float32_matmul_precision("highest")
     if args.native:
@@ -78,9 +81,6 @@ def main():
         def baseline_forward(a):
             return torch.linalg.matrix_exp(a.float()).to(a.dtype)
 
-    args.output.mkdir(parents=True, exist_ok=True)
-    summary_path = args.output / "numerical_summary.json"
-    summary_path.unlink(missing_ok=True)
     metadata = dict(
         host=platform.node(),
         gpu=torch.cuda.get_device_name(),
