@@ -5,6 +5,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <cute/container/array.hpp>
+#include <cute/tensor.hpp>
 #include <cmath>
 
 namespace at::native::small_matrix_exp::tiny {
@@ -13,8 +15,8 @@ constexpr double theta18 = 3.010066362817634;
 
 template <int N, bool Pair>
 struct Tile {
-  float d[N];
-  float u[Pair ? N : 1];
+  cute::array<float, N> d;
+  cute::array<float, Pair ? N : 1> u;
 };
 
 template <int N, bool Pair>
@@ -187,10 +189,18 @@ struct Cooperative {
     const int col = (threadIdx.x%(N/Columns))*Columns + e%Columns;
     return row*N+col;
   }
-  struct Tile { float d[Elements]; float u[Pair ? Elements : 1]; };
+  struct Tile {
+    cute::array<float, Elements> d;
+    cute::array<float, Pair ? Elements : 1> u;
+  };
   float* shared;
 
   __device__ __forceinline__ Tile product(const Tile& a, const Tile& b) const {
+    const auto operands = cute::make_tensor(
+        cute::make_smem_ptr(shared),
+        cute::Layout<
+            cute::Shape<cute::Int<N>, cute::Int<N>, cute::Int<Pair ? 4 : 2>>,
+            cute::Stride<cute::Int<N>, cute::_1, cute::Int<N*N>>>{});
 #pragma unroll
     for (int e=0; e<Elements; ++e) {
       const int i = Ops::index(e);
@@ -216,15 +226,15 @@ struct Cooperative {
 #pragma unroll
       for (int col=0; col<Columns; ++col) {
         const int j = index(col)%N;
-        bd[col] = shared[N*N+k*N+j];
-        if constexpr (Pair) b_upper[col] = shared[3*N*N+k*N+j];
+        bd[col] = operands(k, j, cute::_1{});
+        if constexpr (Pair) b_upper[col] = operands(k, j, cute::_3{});
       }
 #pragma unroll
       for (int row=0; row<Rows; ++row) {
         const int i = index(row*Columns)/N;
-        const float ad = shared[i*N+k];
+        const float ad = operands(i, k, cute::_0{});
         float au = 0.f;
-        if constexpr (Pair) au = shared[2*N*N+i*N+k];
+        if constexpr (Pair) au = operands(i, k, cute::_2{});
 #pragma unroll
         for (int col=0; col<Columns; ++col) {
           const int e = row*Columns+col;

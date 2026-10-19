@@ -17,7 +17,7 @@ void launch_small_matrix_exp(
   const float* direction = Pair ? g.const_data_ptr<float>() : nullptr;
   const auto batch = x.size(0);
   if constexpr (N <= 8) {
-    constexpr int threads = 128;
+    constexpr int threads = small_matrix_exp::tiny::threads;
     const auto blocks = (batch * N + threads - 1) / threads;
     small_matrix_exp::tiny::expm_kernel<N, Pair, -1><<<blocks, threads, 0, stream>>>(
         x.const_data_ptr<float>(), direction, out.mutable_data_ptr(), dtype, batch, 0);

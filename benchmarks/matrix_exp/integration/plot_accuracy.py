@@ -329,7 +329,13 @@ def main():
             for n, m in MARKERS.items()
             if n in grid["n"]
         ]
-        ax.legend(handles=handles, loc="lower left", framealpha=0.95, ncol=2)
+        ax.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.2),
+            frameon=False,
+            ncol=4,
+        )
         ax.text(
             0.97,
             0.96,

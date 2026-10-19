@@ -27,6 +27,37 @@ class TestNativeMatrixExp(TestCase):
 
     @onlyCUDA
     @parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+    @parametrize("n", [4, 8, 16, 32])
+    def test_launch_boundaries(self, device, dtype, n):
+        torch.manual_seed(9041)
+        a = (torch.randn(1, n, n, device=device) * 0.1).to(dtype)
+        g = torch.randn_like(a) * 0.2
+        expected_y = reference(a)
+        expected_grad = reference(a.mT, g)
+        baseline = None
+        # Cross tiny-kernel block tails and each cooperative thread-count boundary.
+        for batch in (1, 15, 16, 17, 31, 32, 33, 127, 128, 129):
+            with self.subTest(batch=batch):
+                x = a.repeat(batch, 1, 1).requires_grad_()
+                y = torch.linalg.matrix_exp(x)
+                (grad,) = torch.autograd.grad(y, x, g.repeat(batch, 1, 1))
+                self.check_error(
+                    y,
+                    expected_y.expand_as(y),
+                    0.001 if dtype == torch.float32 else 0.05,
+                )
+                self.check_error(
+                    grad,
+                    expected_grad.expand_as(grad),
+                    0.005 if dtype == torch.float32 else 0.1,
+                )
+                if baseline is None:
+                    baseline = (y.detach(), grad)
+                self.assertEqual(y, baseline[0].expand_as(y), atol=0, rtol=0)
+                self.assertEqual(grad, baseline[1].expand_as(grad), atol=0, rtol=0)
+
+    @onlyCUDA
+    @parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
     def test_all_dimensions(self, device, dtype):
         torch.manual_seed(1021)
         for n in range(2, 33):

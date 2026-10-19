@@ -1,6 +1,60 @@
 ATen integration draft
 ======================
 
+Ampere and Hopper source builds
+------------------------------
+
+The native FP32 FMA and subgroup shuffle instructions work on both SM80 (A100)
+and SM90 (H100). CuTe supplies the register arrays and shared-memory matrix views
+from the repository's pinned CUTLASS headers. Small matrices retain
+register rows; larger supported matrices retain one cooperative block per
+matrix, with only the current product's operands staged in shared memory.
+The explicit FP32 FMA operations preserve fused rounding. Hopper WGMMA's
+reduced-precision inputs are not substituted for these products.
+The manual derivative uses the same architecture-independent CUDA dispatch.
+
+Create separate environments under your scratch directory and initialize the
+pinned headers before building. For example, from the repository root::
+
+    repo=$PWD
+    venvs=/scratch/gautschi/neliopou/venvs
+    export UV_CACHE_DIR="$venvs/.uv-cache"
+    uv venv --python 3.12 "$venvs/matrix-exp-hopper"
+    uv venv --python 3.12 "$venvs/matrix-exp-stock"
+    uv pip install --python "$venvs/matrix-exp-stock/bin/python" torch numpy matplotlib scipy expecttest hypothesis psutil pyyaml optree
+    uv pip install --python "$venvs/matrix-exp-hopper/bin/python" -r requirements.txt matplotlib scipy pytest
+    git submodule update --init --recursive
+    source "$venvs/matrix-exp-hopper/bin/activate"
+    export CUDA_HOME=/path/to/cuda
+    export PATH="$CUDA_HOME/bin:$PATH"
+    export CMAKE_BUILD_TYPE=Release
+    export TORCH_CUDA_ARCH_LIST='8.0;9.0+PTX'
+    export MAX_JOBS=14
+    python -m pip install -e . -v --no-build-isolation
+
+Use a CUDA toolkit and host compiler supported by this checkout, and configure
+cuDNN and other optional libraries for your machine. The architecture list
+embeds native cubins for both devices plus forward-compatible SM90 PTX; SM80
+cubins alone cannot execute on Hopper. Run builds on allocated compute nodes.
+See NVIDIA's `Hopper compatibility guide
+<https://docs.nvidia.com/cuda/hopper-compatibility-guide/index.html>`_ for the
+native-cubin and PTX compatibility rules.
+
+On the H100 allocation, activate the custom environment, then check the loaded
+installation from outside the checkout::
+
+    cd /tmp
+    python -c 'import torch; print(torch.__version__, torch.__file__, torch.version.cuda); print(torch.cuda.get_device_name(), torch.cuda.get_device_capability(), torch.cuda.get_arch_list())'
+    export PYTHONPATH="$repo/benchmarks/matrix_exp"
+    python "$repo/benchmarks/matrix_exp/integration/test_native.py" -v
+    bash "$repo/benchmarks/matrix_exp/integration/run_timings.sh" "$repo/agent_space/hopper/comparison" "$venvs/matrix-exp-stock/bin/python"
+
+The native tests cover all thread-count transitions, partial tiny-kernel blocks,
+forward/backward dispatch and higher derivatives. The timing runner uses the
+public API in each environment and records the installed release, CUDA version,
+GPU capability, build configuration and library hashes. Run the same validation
+on an A100 when available; compiling SM80 does not constitute an A100 runtime test.
+
 Installed-build validation
 --------------------------
 
@@ -60,7 +114,8 @@ For the installed custom PyTorch build, activate its environment and run::
     bash benchmarks/matrix_exp/integration/run_timings.sh /path/to/results /path/to/stock-venv/bin/python
 
 The two backends are ``torch_small_n`` (our integrated CUDA kernel) and
-``torch_linalg`` (the stock PyTorch 2.14.1 release). The runner executes three
+``torch_linalg`` (the stock PyTorch release installed in the second environment).
+The runner executes three
 trials in alternating order and generates forward/backward figures for FP32,
 BF16, and FP16. It then collects fresh per-matrix errors against stock PyTorch
 and generates empirical CDF and speedup-versus-error figures in ``accuracy/``.

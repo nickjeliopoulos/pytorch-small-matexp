@@ -74,7 +74,11 @@ setup(
                 str(entry_probe),
                 str(NATIVE / "cuda/MatrixExpKernel.cu"),
             ],
-            include_dirs=[str(overlay), str(NATIVE)],
+            include_dirs=[
+                str(overlay),
+                str(NATIVE),
+                str(REPO / "third_party/cutlass/include"),
+            ],
             # Match DispatchStubImpl's ABI in the x86-64 release wheel.
             define_macros=[
                 ("HAVE_AVX2_CPU_DEFINITION", "1"),
