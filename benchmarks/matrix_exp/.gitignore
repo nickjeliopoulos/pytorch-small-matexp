@@ -1,6 +1,0 @@
-/build/
-/artifacts/
-/results/
-/*.egg-info/
-/matrix_exp_bench/*.so
-__pycache__/

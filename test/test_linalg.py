@@ -8094,16 +8094,34 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
         check(2, 3, 3)
         check(2, 3, 5, 5)
 
+    @staticmethod
+    def _matrix_exp_frechet_reference(a, g):
+        a, g = a.detach().double(), g.detach().double()
+        n = a.size(-1)
+        augmented = torch.cat((torch.cat((a, g), -1),
+                               torch.cat((torch.zeros_like(a), a), -1)), -2)
+        return torch.linalg.matrix_exp(augmented)[..., :n, n:]
+
+    def _assert_matrix_exp_small_cuda_close(self, actual, expected, *, backward=False):
+        self.assertEqual(actual.shape, expected.shape)
+        self.assertTrue(actual.isfinite().all().item())
+        tolerance = (5e-3 if backward else 1e-3) if actual.dtype == torch.float32 else (0.1 if backward else 0.05)
+        magnitude = 1 + expected.double().abs().flatten(-2).amax(-1)
+        error = (actual.double() - expected.double()).abs().flatten(-2).amax(-1) / magnitude
+        self.assertEqual(error, torch.zeros_like(error), atol=tolerance, rtol=0)
+
     @onlyCUDA
     @skipCUDAIfRocm
     @dtypes(torch.float32, torch.float16, torch.bfloat16)
-    @parametrize("n", [2, 3, 4, 7, 8, 13, 16, 23, 32])
-    @parametrize("neg_view", [False, True])
-    def test_linalg_matrix_exp_small_cuda(self, device, dtype, n, neg_view):
-        for batch in (0, 35):
-            a = (torch.randn(batch, n, n, device=device) * 0.1).to(dtype).mT.detach()
+    @parametrize("n", range(2, 33))
+    @parametrize("view", ["transpose", "negative", "negative_transpose"])
+    def test_linalg_matrix_exp_small_cuda(self, device, dtype, n, view):
+        for batch in (0, 1, 35):
+            a = (torch.randn(batch, n, n, device=device) * 0.1).to(dtype)
+            if view in ("transpose", "negative_transpose"):
+                a = a.mT
             g = torch.randn_like(a) * 0.2
-            if neg_view:
+            if view in ("negative", "negative_transpose"):
                 a = torch._neg_view(a)
                 g = torch._neg_view(g.contiguous())
             a.requires_grad_()
@@ -8111,20 +8129,143 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
             (grad,) = torch.autograd.grad(result, a, g)
             self.assertEqual(result.shape, a.shape)
             self.assertEqual(result.dtype, dtype)
+            self.assertEqual(result.device, a.device)
             self.assertEqual(grad.dtype, dtype)
             if not batch:
                 continue
             expected = torch.linalg.matrix_exp(a.detach().double()).to(dtype)
-            x, direction = a.detach().mT.double(), g.double()
-            augmented = torch.cat((torch.cat((x, direction), -1),
-                                   torch.cat((torch.zeros_like(x), x), -1)), -2)
-            expected_grad = torch.linalg.matrix_exp(augmented)[..., :n, n:].to(dtype)
-            tol = 1e-3 if dtype == torch.float32 else 0.05
-            backward_tol = 5e-3 if dtype == torch.float32 else 0.1
-            for actual, reference, tolerance in ((result, expected, tol), (grad, expected_grad, backward_tol)):
-                magnitude = 1 + reference.double().abs().flatten(-2).amax(-1)
-                error = (actual.double() - reference.double()).abs().flatten(-2).amax(-1) / magnitude
-                self.assertEqual(error, torch.zeros_like(error), atol=tolerance, rtol=0)
+            expected_grad = self._matrix_exp_frechet_reference(a.mT, g).to(dtype)
+            self._assert_matrix_exp_small_cuda_close(result, expected)
+            self._assert_matrix_exp_small_cuda_close(grad, expected_grad, backward=True)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [4, 8, 16, 32])
+    def test_linalg_matrix_exp_small_cuda_launch_boundaries(self, device, dtype, n):
+        a = (torch.randn(1, n, n, device=device) * 0.1).to(dtype)
+        g = torch.randn_like(a) * 0.2
+        expected = torch.linalg.matrix_exp(a.double())
+        expected_grad = self._matrix_exp_frechet_reference(a.mT, g)
+        baseline = None
+        # Cross partial tiny-kernel blocks and cooperative thread-count boundaries.
+        for batch in (1, 15, 16, 17, 31, 32, 33, 127, 128, 129):
+            with self.subTest(batch=batch):
+                x = a.repeat(batch, 1, 1).requires_grad_()
+                result = torch.linalg.matrix_exp(x)
+                (grad,) = torch.autograd.grad(result, x, g.repeat(batch, 1, 1))
+                self._assert_matrix_exp_small_cuda_close(result, expected.expand_as(result))
+                self._assert_matrix_exp_small_cuda_close(grad, expected_grad.expand_as(grad), backward=True)
+                if baseline is None:
+                    baseline = (result.detach(), grad)
+                self.assertEqual(result, baseline[0].expand_as(result), atol=0, rtol=0)
+                self.assertEqual(grad, baseline[1].expand_as(grad), atol=0, rtol=0)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [4, 8, 16, 32])
+    def test_linalg_matrix_exp_small_cuda_scaling_boundaries(self, device, dtype, n):
+        theta = 3.010066362817634
+        norms = [0, 0.1, theta * (1 - 1e-5), theta * (1 + 1e-5),
+                 2 * theta * (1 - 1e-5), 2 * theta * (1 + 1e-5), 4 * theta, 8 * theta]
+        matrices = []
+        for i, norm in enumerate(norms):
+            generator = torch.Generator(device=device).manual_seed(841 + i)
+            matrix = torch.randn(n, n, dtype=dtype, device=device, generator=generator).float()
+            scale = norm / torch.linalg.matrix_norm(matrix, ord=1).clamp_min(1e-12)
+            matrices.append((matrix * scale).to(dtype))
+        a = torch.stack(matrices).requires_grad_()
+        g = torch.randn_like(a) * 0.2
+        result = torch.linalg.matrix_exp(a)
+        (grad,) = torch.autograd.grad(result, a, g)
+        self._assert_matrix_exp_small_cuda_close(result, torch.linalg.matrix_exp(a.detach().double()))
+        self._assert_matrix_exp_small_cuda_close(
+            grad, self._matrix_exp_frechet_reference(a.mT, g), backward=True)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [3, 4, 8, 13, 16, 23, 32])
+    def test_linalg_matrix_exp_small_cuda_graph(self, device, dtype, n):
+        values = torch.tensor([0, 0.01, 3.01006, 3.01007, 6.02014, -20], device=device)
+        a = (values[:, None, None] * torch.eye(n, device=device)).to(dtype).requires_grad_()
+        g = torch.randn_like(a) * 0.1
+        stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                torch.autograd.grad(torch.linalg.matrix_exp(a), a, g)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            result = torch.linalg.matrix_exp(a)
+            (grad,) = torch.autograd.grad(result, a, g)
+        for replay in range(2):
+            if replay:
+                # Replay must use the new data, including each matrix's scaling.
+                with torch.no_grad():
+                    a.copy_(a.flip(0) * 0.5)
+                    g.mul_(0.5)
+            graph.replay()
+            self._assert_matrix_exp_small_cuda_close(result, torch.linalg.matrix_exp(a.detach().double()))
+            self._assert_matrix_exp_small_cuda_close(
+                grad, self._matrix_exp_frechet_reference(a.mT, g), backward=True)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [4, 16, 32])
+    def test_linalg_matrix_exp_small_cuda_higher_derivatives(self, device, dtype, n):
+        a = (torch.randn(2, n, n, device=device) * 0.03).to(dtype).requires_grad_()
+        g, h = torch.randn_like(a) * 0.1, torch.randn_like(a) * 0.1
+        expected_tangent = self._matrix_exp_frechet_reference(a, g)
+        for grad_enabled in (False, True):
+            with torch.set_grad_enabled(grad_enabled), fwAD.dual_level():
+                dual = fwAD.make_dual(a, g)
+                _, tangent = fwAD.unpack_dual(torch.linalg.matrix_exp(dual))
+                self.assertIsNotNone(tangent)
+                self.assertEqual(tangent.dtype, dtype)
+                self._assert_matrix_exp_small_cuda_close(tangent, expected_tangent, backward=True)
+        (first,) = torch.autograd.grad(torch.linalg.matrix_exp(a), a, g, create_graph=True)
+        (second,) = torch.autograd.grad(first, a, h)
+        ref_a = a.detach().double().requires_grad_()
+        (ref_first,) = torch.autograd.grad(torch.linalg.matrix_exp(ref_a), ref_a, g.double(), create_graph=True)
+        (ref_second,) = torch.autograd.grad(ref_first, ref_a, h.double())
+        self.assertEqual(second.dtype, dtype)
+        self._assert_matrix_exp_small_cuda_close(second, ref_second, backward=True)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32)
+    @parametrize("n", [4, 8, 16, 32])
+    def test_linalg_matrix_exp_small_cuda_directional_difference(self, device, dtype, n):
+        a = (torch.randn(2, n, n, device=device, dtype=dtype) * 0.03).requires_grad_()
+        h, g = torch.randn_like(a) * 0.1, torch.randn_like(a) * 0.2
+        (gradient,) = torch.autograd.grad(torch.linalg.matrix_exp(a), a, g)
+        step = 0.005
+        finite_difference = ((torch.linalg.matrix_exp(a + step * h)
+                              - torch.linalg.matrix_exp(a - step * h)) * g).sum() / (2 * step)
+        self.assertEqual((gradient * h).sum(), finite_difference, atol=0.001, rtol=0.005)
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    @dtypes(torch.float32, torch.float16, torch.bfloat16)
+    @parametrize("n", [4, 8, 16, 32])
+    def test_linalg_matrix_exp_small_cuda_nonfinite(self, device, dtype, n):
+        a = torch.zeros(4, n, n, dtype=dtype, device=device)
+        a[:3, 0, 0] = torch.tensor([float("nan"), float("inf"), -float("inf")], device=device, dtype=dtype)
+        a.requires_grad_()
+        result = torch.linalg.matrix_exp(a)
+        (grad,) = torch.autograd.grad(result, a, torch.ones_like(a))
+        self.assertEqual(result.shape, a.shape)
+        self.assertEqual(result.dtype, dtype)
+        self.assertEqual(grad.shape, a.shape)
+        self.assertEqual(grad.dtype, dtype)
+        self.assertTrue(result[:3].isnan().all().item())
+        self.assertTrue(grad[:3].isnan().all().item())
+        self.assertEqual(result[3], torch.eye(n, dtype=dtype, device=device))
+        self.assertEqual(grad[3], torch.ones_like(grad[3]))
 
     @onlyCUDA
     @skipCUDAIfRocm
@@ -8283,8 +8424,39 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
                         regime = "scalar"
                     self.assertEqual(len(kernels), 1, msg=str(kernels))
                     self.assertIn(f"small_matrix_exp::{regime}::", kernels[0])
+                    if operation == "backward" and n > 1:
+                        self.assertRegex(kernels[0], r",\s*(?:true|\(bool\)\s*1)\s*[,>]")
                 else:
                     self.assertEqual(kernels, [])
+
+    @onlyCUDA
+    @skipCUDAIfRocm
+    def test_linalg_matrix_exp_small_cuda_fallback(self, device):
+        from torch.profiler import profile, ProfilerActivity, supported_activities
+
+        if ProfilerActivity.CUDA not in supported_activities():
+            self.skipTest("CUDA kernel tracing requires CUPTI")
+        for shape, dtype, target in (
+            ((4, 4), torch.float32, device),
+            ((1, 2, 4, 4), torch.float32, device),
+            ((2, 33, 33), torch.float32, device),
+            ((2, 4, 4), torch.float64, device),
+            ((2, 4, 4), torch.complex64, device),
+            ((2, 4, 4), torch.float32, "cpu"),
+        ):
+            with self.subTest(shape=shape, dtype=dtype, device=target):
+                a = (torch.randn(shape, dtype=dtype, device=target) * 0.03).requires_grad_()
+                g = torch.randn_like(a)
+                result = torch.linalg.matrix_exp(a)
+                torch.autograd.grad(result, a, g, retain_graph=True)
+                torch.cuda.synchronize()
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+                    torch.linalg.matrix_exp(a)
+                    torch.autograd.grad(result, a, g)
+                    torch.cuda.synchronize()
+                kernels = [event.name for event in prof.events()
+                           if event.device_type.name == "CUDA" and "small_matrix_exp::" in event.name]
+                self.assertEqual(kernels, [])
 
     @onlyCUDA
     @skipCUDAIfRocm
